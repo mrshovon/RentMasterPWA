@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../../lib/supabase-server';
+import { isTenantLoginBlocked, TENANT_BLOCKED_MESSAGE } from '../../../../../lib/tenant-access';
 
 // =====================================================================================
 // 🚀 TENANT SELF-PROFILE ENGINE: returns the signed-in tenant's own record joined with
@@ -18,6 +19,7 @@ export async function GET(request: NextRequest) {
       .from('tenants')
       .select(`
         id, name, phone, family_members, monthly_rent, due_date, rented_date, service_charge, advance_amount, property_id,
+        allow_login_unassigned,
         properties:property_id ( id, name, address, flat_no, is_vacant, owner_id, owner_phone )
       `)
       .eq('id', tenantId)
@@ -26,6 +28,16 @@ export async function GET(request: NextRequest) {
     if (tenantError) {
       console.error('Supabase Tenant Self-Profile Fetch Error:', tenantError);
       return NextResponse.json({ error: tenantError.message }, { status: 500 });
+    }
+
+    // Eviction path: tenant JWTs last 7 days and carry no revocation, so blocking login alone
+    // would leave an already-signed-in tenant with a week of access. The dashboard calls this on
+    // mount, so failing here logs them out on their next load — with no per-request DB cost.
+    if (isTenantLoginBlocked(tenantRow as any)) {
+      return NextResponse.json(
+        { error: TENANT_BLOCKED_MESSAGE, code: 'LOGIN_BLOCKED' },
+        { status: 403 }
+      );
     }
 
     const propertyNode = (tenantRow as any).properties || null;

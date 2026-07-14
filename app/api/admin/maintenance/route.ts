@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../lib/supabase-server';
 import { assertOwnerCanWrite } from '../../../../lib/subscription';
+import { sendPushToUsers } from '../../../../lib/push-send';
 import crypto from 'crypto';
 
 // =====================================================================================
@@ -69,12 +70,30 @@ export async function POST(request: NextRequest) {
           estimated_cost: costValue
         }
       ])
-      .select()
+      // Embed the owning property so we know whose device to buzz (mirrors the GET).
+      .select('*, properties:property_id ( name, flat_no, owner_id )')
       .single();
 
     if (databaseInsertLogException) {
       console.error('Supabase Maintenance Execution Logging Registry Failure:', databaseInsertLogException);
       return NextResponse.json({ error: databaseInsertLogException.message }, { status: 500 });
+    }
+
+    // 3b. A tenant filed the ticket — buzz the property's owner. (When the owner files it
+    // themselves there is nobody to notify.) Fire-and-forget: never fail the response.
+    const propertyOwnerId = (maintenanceLogRecord as any)?.properties?.owner_id;
+    if (tenantHeaderId && propertyOwnerId) {
+      const unitLabel = (maintenanceLogRecord as any)?.properties?.name || 'a property';
+      try {
+        await sendPushToUsers([propertyOwnerId], {
+          title: `New ${priorityLevel || 'medium'}-priority request`,
+          body: `${issueTitle} — ${unitLabel}`,
+          url: '/owner',
+          tag: `maintenance-${logIdentityId}`,
+        });
+      } catch (pushErr) {
+        console.error('[maintenance] push dispatch failed (non-fatal):', pushErr);
+      }
     }
 
     // 4. Send success verification logs response back to UI interface component grids

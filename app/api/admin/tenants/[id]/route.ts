@@ -32,19 +32,24 @@ export async function PATCH(
     if (!itemGuard.ok) return NextResponse.json(itemGuard.body, { status: itemGuard.status });
 
     const body = await request.json();
-    const { name, phone, monthlyRent, serviceCharge, advanceAmount, dueDate, familyMembers } = body;
+    const {
+      name, phone, monthlyRent, serviceCharge, advanceAmount, dueDate, familyMembers, propertyId,
+      allowLoginUnassigned,
+    } = body;
 
-    // 1. Load current record + owning property for a governance check and old_rent capture.
+    // 1. Load current record for a governance check and old_rent capture. Ownership is
+    // read from tenants.owner_id (not the property) so an unassigned tenant — one with
+    // no property_id — is still scoped to exactly one owner.
     const { data: current, error: currentError } = await supabaseAdminEngine
       .from('tenants')
-      .select('*, properties:property_id ( owner_id )')
+      .select('*')
       .eq('id', tenantId)
       .single();
 
     if (currentError || !current) {
       return NextResponse.json({ error: currentError?.message || 'Tenant not found.' }, { status: 404 });
     }
-    if ((current as any).properties?.owner_id && (current as any).properties.owner_id !== ownerId) {
+    if (current.owner_id !== ownerId) {
       return NextResponse.json({ error: 'This tenant does not belong to your portfolio.' }, { status: 403 });
     }
 
@@ -68,6 +73,46 @@ export async function PATCH(
     if (advanceAmount !== undefined) updates.advance_amount = parseFloat(advanceAmount);
     if (dueDate !== undefined) updates.due_date = parseInt(dueDate, 10);
     if (familyMembers !== undefined) updates.family_members = parseInt(familyMembers, 10);
+    // Owner's override letting an unassigned tenant keep portal access (see lib/tenant-access.ts).
+    if (allowLoginUnassigned !== undefined) updates.allow_login_unassigned = !!allowLoginUnassigned;
+
+    // 2b. Property (re)assignment. A null/empty propertyId unassigns the tenant (they
+    // keep their record and history); a new id moves them. The unit they leave is freed
+    // and the one they enter is occupied — see step 4.
+    let propertyBeingLeft: string | null = null;
+    if (propertyId !== undefined && propertyId !== current.property_id) {
+      if (!propertyId) {
+        updates.property_id = null;
+      } else {
+        const { data: target } = await supabaseAdminEngine
+          .from('properties')
+          .select('id, owner_id')
+          .eq('id', propertyId)
+          .maybeSingle();
+
+        if (!target) {
+          return NextResponse.json({ error: 'That property does not exist.' }, { status: 404 });
+        }
+        if (target.owner_id !== ownerId) {
+          return NextResponse.json({ error: 'That property does not belong to your portfolio.' }, { status: 403 });
+        }
+
+        const { data: occupant } = await supabaseAdminEngine
+          .from('tenants')
+          .select('name')
+          .eq('property_id', propertyId)
+          .neq('id', tenantId)
+          .maybeSingle();
+        if (occupant) {
+          return NextResponse.json(
+            { error: `${occupant.name} already occupies that property. Vacate it first.` },
+            { status: 409 }
+          );
+        }
+        updates.property_id = propertyId;
+      }
+      propertyBeingLeft = current.property_id;
+    }
 
     if (Object.keys(updates).length === 0) {
       return NextResponse.json({ error: 'No editable fields supplied.' }, { status: 400 });
@@ -100,6 +145,27 @@ export async function PATCH(
           },
         ]);
       if (archiveError) console.error('Rent revision archive warning:', archiveError.message);
+    }
+
+    // 4. Keep the vacancy flags in step with the move: free the unit they left, occupy
+    // the one they entered. Both are scoped to this owner.
+    if (updates.property_id !== undefined) {
+      if (propertyBeingLeft) {
+        const { error: freeError } = await supabaseAdminEngine
+          .from('properties')
+          .update({ is_vacant: true })
+          .eq('id', propertyBeingLeft)
+          .eq('owner_id', ownerId);
+        if (freeError) console.error('Vacancy flag warning (vacated unit):', freeError.message);
+      }
+      if (updates.property_id) {
+        const { error: occupyError } = await supabaseAdminEngine
+          .from('properties')
+          .update({ is_vacant: false })
+          .eq('id', updates.property_id)
+          .eq('owner_id', ownerId);
+        if (occupyError) console.error('Vacancy flag warning (occupied unit):', occupyError.message);
+      }
     }
 
     return NextResponse.json({ success: true, data: updated }, { status: 200 });

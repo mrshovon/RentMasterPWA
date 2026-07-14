@@ -77,6 +77,18 @@ export async function PATCH(
         console.error('Supabase Property Vacate Error:', vacateError);
         return NextResponse.json({ error: vacateError.message }, { status: 500 });
       }
+
+      // Detach the occupants. Without this the unit reads "vacant" while its tenants still
+      // point at it — they'd stay billable and keep showing up in the invoice picker. They
+      // keep their record and can be re-assigned to another unit.
+      if ((occupants || []).length) {
+        const { error: detachError } = await supabaseAdminEngine
+          .from('tenants')
+          .update({ property_id: null })
+          .eq('property_id', propertyId);
+        if (detachError) console.error('Tenant detach warning:', detachError.message);
+      }
+
       return NextResponse.json({ success: true, message: 'Property marked vacant; occupancy archived.', data: vacated }, { status: 200 });
     }
 

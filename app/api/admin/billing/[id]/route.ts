@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../../lib/supabase-server';
 import { assertOwnerCanWrite, resolveOwnerSubscription, assertItemEnabled } from '../../../../../lib/subscription';
+import { sendPushToUsers } from '../../../../../lib/push-send';
 import crypto from 'crypto';
 
 // ==============================================================================
@@ -98,6 +99,32 @@ export async function PATCH(
       if (noticeError) {
         // Non-fatal: the status change already succeeded; just log the notify miss.
         console.error('Owner notice dispatch warning:', noticeError.message);
+      }
+
+      // Same event, second channel: buzz the owner's device so they can verify the payment.
+      try {
+        await sendPushToUsers([updatedLedgerRecord.created_by_owner], {
+          title: 'Rent marked as sent',
+          body: `${tenantName} says they've sent ৳${amount} for ${monthLabel}. Please confirm receipt.`,
+          url: '/owner',
+          tag: `bill-sent-${billingRecordId}`,
+        });
+      } catch (pushErr) {
+        console.error('[billing] owner push dispatch failed (non-fatal):', pushErr);
+      }
+    }
+
+    // 4b-ii. Owner confirmed the payment — tell the tenant their bill is settled.
+    if (paymentStatus === 'paid' && ownerId && updatedLedgerRecord) {
+      try {
+        await sendPushToUsers([updatedLedgerRecord.tenant_id], {
+          title: 'Payment confirmed',
+          body: `Your rent for ${updatedLedgerRecord.billing_month} (৳${updatedLedgerRecord.total_payable}) is marked paid. Receipt available.`,
+          url: '/tenant',
+          tag: `bill-paid-${billingRecordId}`,
+        });
+      } catch (pushErr) {
+        console.error('[billing] tenant push dispatch failed (non-fatal):', pushErr);
       }
     }
 

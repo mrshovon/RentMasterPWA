@@ -16,18 +16,20 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Context matching identity extraction missing.' }, { status: 400 });
     }
 
-    // Relational schema dynamic lookup matching: Pull only tenants linked to properties owned by this owner
+    // Scope on tenants.owner_id (not the property join) so tenants who are currently
+    // unassigned — moved out, between flats — still belong to, and are visible to, their
+    // owner. The property embed is a left join: `properties` is null when unassigned.
     const { data: tenantsList, error: fetchError } = await supabaseAdminEngine
       .from('tenants')
       .select(`
         *,
-        properties!inner (
+        properties:property_id (
           id,
           name,
           owner_id
         )
       `)
-      .eq('properties.owner_id', ownerId);
+      .eq('owner_id', ownerId);
 
     if (fetchError) {
       console.error('Supabase Tenants Fetch Error:', fetchError);
@@ -94,6 +96,7 @@ export async function POST(request: NextRequest) {
         {
           id: tenantId,
           property_id: propertyId,
+          owner_id: ownerId,
           name: name,
           phone: phone,
           family_members: familyMembers || 1,

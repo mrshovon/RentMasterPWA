@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../lib/supabase-server';
 import { assertOwnerCanWrite, resolveOwnerSubscription, assertItemEnabled } from '../../../../lib/subscription';
+import { sendPushToUsers } from '../../../../lib/push-send';
 import crypto from 'crypto';
 
 
@@ -116,6 +117,18 @@ export async function POST(request: NextRequest) {
     if (billingInsertError) {
       console.error('Supabase Billing Ledger Write Error:', billingInsertError);
       return NextResponse.json({ error: billingInsertError.message }, { status: 500 });
+    }
+
+    // Fire-and-forget Web Push to the tenant being billed (never fail the response on push).
+    try {
+      await sendPushToUsers([tenantId], {
+        title: 'New invoice',
+        body: `Your bill for ${billingMonth} is ৳${totalPayable}.`,
+        url: '/tenant',
+        tag: `invoice-${billingId}`,
+      });
+    } catch (pushErr) {
+      console.error('[billing] push dispatch failed (non-fatal):', pushErr);
     }
 
     return NextResponse.json({ success: true, data: billingRecord }, { status: 201 });

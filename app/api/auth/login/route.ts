@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { supabaseClient, supabaseAdminEngine } from '@/lib/supabase-server';
 import { signTenantToken } from '@/lib/tenant-jwt';
+import { isTenantLoginBlocked, TENANT_BLOCKED_MESSAGE } from '@/lib/tenant-access';
 import crypto from 'crypto';
 
 // =====================================================================================
@@ -95,7 +96,7 @@ export async function POST(request: Request) {
 
       const { data: tenant, error } = await supabaseAdminEngine
         .from('tenants')
-        .select('id, name, phone, password_hash')
+        .select('id, name, phone, password_hash, property_id, allow_login_unassigned')
         .eq('phone', String(phone).trim())
         .maybeSingle();
       if (error) throw error;
@@ -107,6 +108,15 @@ export async function POST(request: Request) {
         return NextResponse.json({ success: false, error: 'Invalid phone or passcode.' }, { status: 401, headers: cors });
       }
       clearFailures(key);
+
+      // Access check runs only AFTER the passcode verifies, so it can't be used to enumerate
+      // accounts — and it does not count as a failed attempt, since the credentials were right.
+      if (isTenantLoginBlocked(tenant)) {
+        return NextResponse.json(
+          { success: false, error: TENANT_BLOCKED_MESSAGE, code: 'LOGIN_BLOCKED' },
+          { status: 403, headers: cors }
+        );
+      }
       const token = await signTenantToken(tenant.id, tenant.name);
       return NextResponse.json({ success: true, token, role: 'tenant', id: tenant.id, name: tenant.name }, { status: 200, headers: cors });
     }

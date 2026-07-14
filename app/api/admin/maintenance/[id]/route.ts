@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../../lib/supabase-server';
 import { assertOwnerCanWrite } from '../../../../../lib/subscription';
+import { sendPushToUsers } from '../../../../../lib/push-send';
 
 // ==============================================================================
 // 🚀 MAINTENANCE MUTATOR: owner updates a ticket's resolution status + remarks.
@@ -53,6 +54,22 @@ export async function PATCH(
     if (error) {
       console.error('Supabase Maintenance Update Error:', error);
       return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+
+    // Tell the tenant who raised it that the status moved. Fire-and-forget: a push
+    // failure must never fail the status change.
+    if (updates.resolution_status && data?.tenant_id) {
+      const statusLabel = String(updates.resolution_status).replace('_', ' ');
+      try {
+        await sendPushToUsers([data.tenant_id], {
+          title: `Request ${statusLabel}`,
+          body: `"${data.issue_title}" is now ${statusLabel}.`,
+          url: '/tenant',
+          tag: `maintenance-${logId}`,
+        });
+      } catch (pushErr) {
+        console.error('[maintenance] tenant push dispatch failed (non-fatal):', pushErr);
+      }
     }
 
     return NextResponse.json({ success: true, data }, { status: 200 });
