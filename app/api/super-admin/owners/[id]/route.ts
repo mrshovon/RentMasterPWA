@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
+import { logPasswordReset, clientIpFrom } from '@/lib/password-reset-log';
 
 // =====================================================================================
 // 🛡️ ADMIN — SINGLE OWNER
@@ -104,6 +105,14 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     if (password) {
       const { error } = await supabaseAdminEngine.auth.admin.updateUserById(id, { password });
       if (error) throw error;
+      // Audit trail (admin-only view). Best-effort — never fail the reset over a log write.
+      await logPasswordReset({
+        ownerId: id,
+        ownerEmail: cur?.user?.email || null,
+        resetBy: request.headers.get('x-rentmaster-uid'),
+        method: 'admin_reset',
+        ip: clientIpFrom(request.headers),
+      });
       return NextResponse.json({ success: true, message: 'Password reset successfully.' });
     }
 

@@ -83,6 +83,17 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
+    // Paid tiers now go through the bKash payment cycle (submit -> admin approval), so this
+    // route no longer self-activates them. Only free-tier switches/downgrades stay instant.
+    // The frontend routes paid tiers to the payment screen (POST /api/admin/payments).
+    if (Number(tier.price || 0) > 0) {
+      return NextResponse.json({
+        success: false,
+        code: 'PAYMENT_REQUIRED',
+        error: `The ${tier.name} plan requires a payment. Please complete payment to activate it.`,
+      }, { status: 400 });
+    }
+
     // Block a downgrade that would leave the owner over the target plan's limits.
     // (Upgrades and same-tier renewals never trip this — usage is already within limit.)
     const maxP = tier.max_properties_allowed ?? -1;
