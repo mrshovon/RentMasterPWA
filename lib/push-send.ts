@@ -1,7 +1,9 @@
-// Web Push (VAPID) sender — no Firebase. Reads subscriptions from `device_tokens` and
-// delivers via the standard Web Push protocol using the `web-push` library.
+// Notification fan-out. Browser subscriptions go out over Web Push (VAPID, no Firebase);
+// native Android subscriptions (device_type='android') go out over FCM (see fcm-send.ts).
+// Both read from the same `device_tokens` table. Callers use one API (sendPushToUsers/Role).
 import webpush from 'web-push';
 import { supabaseAdminEngine } from './supabase-server';
+import { sendFcm } from './fcm-send';
 
 const VAPID_PUBLIC = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || '';
 const VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY || '';
@@ -26,9 +28,21 @@ export interface PushPayload {
   tag?: string;   // collapse key
 }
 
-interface TokenRow { token: string; p256dh: string | null; auth: string | null; }
+interface TokenRow { token: string; p256dh: string | null; auth: string | null; device_type?: string | null; }
 
+// Split rows by transport and deliver to each. Web + FCM run in parallel; a failure in one
+// never blocks the other.
 async function deliver(rows: TokenRow[], payload: PushPayload): Promise<void> {
+  if (rows.length === 0) return;
+  const androidTokens = rows.filter((r) => r.device_type === 'android').map((r) => r.token);
+  const webRows = rows.filter((r) => r.device_type !== 'android' && r.p256dh && r.auth);
+  await Promise.all([
+    deliverWeb(webRows, payload),
+    sendFcm(androidTokens, payload),
+  ]);
+}
+
+async function deliverWeb(rows: TokenRow[], payload: PushPayload): Promise<void> {
   if (!ensureConfigured() || rows.length === 0) return;
   const body = JSON.stringify(payload);
   const staleEndpoints: string[] = [];
@@ -60,7 +74,7 @@ export async function sendPushToUsers(userIds: string[], payload: PushPayload): 
   if (!userIds.length) return;
   const { data } = await supabaseAdminEngine
     .from('device_tokens')
-    .select('token, p256dh, auth')
+    .select('token, p256dh, auth, device_type')
     .in('user_id', userIds);
   await deliver((data as TokenRow[]) || [], payload);
 }
@@ -69,7 +83,7 @@ export async function sendPushToUsers(userIds: string[], payload: PushPayload): 
 export async function sendPushToRole(role: 'tenant' | 'owner' | 'admin', payload: PushPayload): Promise<void> {
   const { data } = await supabaseAdminEngine
     .from('device_tokens')
-    .select('token, p256dh, auth')
+    .select('token, p256dh, auth, device_type')
     .eq('role', role);
   await deliver((data as TokenRow[]) || [], payload);
 }
