@@ -111,6 +111,8 @@ export async function POST(request: Request) {
     return NextResponse.json({
       success: true,
       token: session?.session?.access_token || null,
+      refreshToken: session?.session?.refresh_token || null,
+      expiresAt: session?.session?.expires_at || null,
       role: 'owner',
       id: ownerId,
       name,

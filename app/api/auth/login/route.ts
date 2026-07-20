@@ -79,6 +79,10 @@ export async function POST(request: Request) {
       return NextResponse.json({
         success: true,
         token: data.session.access_token,
+        // Returned so the client can silently renew the ~1h access token and stay logged in
+        // until an explicit logout (see /api/auth/refresh).
+        refreshToken: data.session.refresh_token,
+        expiresAt: data.session.expires_at,
         role,
         id: u?.id,
         name: (u?.user_metadata as any)?.name || u?.email || 'Owner',
