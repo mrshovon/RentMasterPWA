@@ -23,8 +23,12 @@ export async function POST(request: Request) {
       // Native FCM token — no p256dh/auth (those are Web Push crypto keys).
       row = { user_id: userId, token: nativeToken, p256dh: null, auth: null, role, device_type: 'android' };
     } else if (sub?.endpoint && sub?.keys?.p256dh && sub?.keys?.auth) {
-      // Standard Web Push subscription.
-      row = { user_id: userId, token: sub.endpoint, p256dh: sub.keys.p256dh, auth: sub.keys.auth, role, device_type: deviceType };
+      // Standard Web Push subscription. device_type is forced to 'web' rather than echoing
+      // the client's label: the presence of the ECDH keys IS the proof of transport, and the
+      // browser used to send the operating system here — so an Android PWA was stored as
+      // 'android' and later routed to FCM, which silently killed browser push on every
+      // Android device. Transport is never taken from the client now.
+      row = { user_id: userId, token: sub.endpoint, p256dh: sub.keys.p256dh, auth: sub.keys.auth, role, device_type: 'web' };
     }
 
     if (!row) {
