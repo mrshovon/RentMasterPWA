@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { resolveOwnerSubscription, getDisabledItemIds, countOwnerUsage } from '@/lib/subscription';
+import { resolveOwnerFeatures } from '@/lib/features';
 
 // =====================================================================================
 // 🧾 OWNER — MY SUBSCRIPTION
@@ -31,6 +32,10 @@ export async function GET(request: NextRequest) {
     // Which items are disabled (over the effective limit) so the UI can grey them.
     const { disabledPropertyIds, disabledTenantIds } = await getDisabledItemIds(uid, sub.limits);
 
+    // Which paid modules this owner may use. Single source for the UI, so the owner
+    // dashboard doesn't need a second request to decide what to render.
+    const features = await resolveOwnerFeatures(uid);
+
     // Available plans for the upgrade/activate list.
     const { data: tiers } = await supabaseAdminEngine
       .from('subscription_tiers')
@@ -41,6 +46,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({
       success: true,
       subscription: sub,
+      features,
       usage: {
         properties: { current: usage.properties, limit: sub.limits.maxProperties },
         tenants: { current: usage.tenants, limit: sub.limits.maxTenants },

@@ -29,6 +29,29 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
       .limit(1)
       .maybeSingle();
 
+    // Staff add-on state: bundled with the plan, or granted per-owner (see lib/features.ts).
+    // When the plan already includes it, the per-owner grant is moot and the UI disables it.
+    // Both are separate, error-tolerant queries rather than a join on the subscription select:
+    // before ADD_STAFF.sql runs, the table/column don't exist, and a failed join would take the
+    // whole owner-detail page down instead of just reporting the add-on as off.
+    const { data: staffAddonRow } = await supabaseAdminEngine
+      .from('owner_addons')
+      .select('enabled, granted_at')
+      .eq('owner_id', id)
+      .eq('addon_key', 'staff')
+      .maybeSingle();
+
+    let staffIncludedInPlan = false;
+    const planTierId = (subscription as any)?.tier_id;
+    if (planTierId) {
+      const { data: tierRow } = await supabaseAdminEngine
+        .from('subscription_tiers')
+        .select('staff_included')
+        .eq('id', planTierId)
+        .maybeSingle();
+      staffIncludedInPlan = !!tierRow?.staff_included;
+    }
+
     const { data: props } = await supabaseAdminEngine.from('properties').select('id').eq('owner_id', id);
     const propertyIds = (props || []).map((p) => p.id);
     let tenantCount = 0;
@@ -54,6 +77,9 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
         permissions_revoked: !!meta.permissions_revoked,
         profile: profile || null,
         subscription: subscription || null,
+        staff_addon: !!staffAddonRow?.enabled,
+        staff_addon_granted_at: staffAddonRow?.granted_at || null,
+        staff_included_in_plan: staffIncludedInPlan,
         propertyCount: propertyIds.length,
         tenantCount,
       },
@@ -88,6 +114,26 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       });
       if (error) throw error;
       return NextResponse.json({ success: true, message: action === 'revoke_permission' ? 'Management permissions revoked.' : 'Management permissions restored.' });
+    }
+
+    // Paid add-on grant. Kept in owner_addons rather than user_metadata, which the owner
+    // can write themselves — see ADD_STAFF.sql / lib/features.ts.
+    if (action === 'enable_staff_addon' || action === 'disable_staff_addon') {
+      const enabled = action === 'enable_staff_addon';
+      const { error } = await supabaseAdminEngine
+        .from('owner_addons')
+        .upsert({
+          owner_id: id,
+          addon_key: 'staff',
+          enabled,
+          granted_by: request.headers.get('x-rentmaster-uid'),
+          granted_at: new Date().toISOString(),
+        }, { onConflict: 'owner_id,addon_key' });
+      if (error) throw error;
+      return NextResponse.json({
+        success: true,
+        message: enabled ? 'Staff add-on enabled.' : 'Staff add-on disabled.',
+      });
     }
 
     if (action === 'cancel_subscription') {
