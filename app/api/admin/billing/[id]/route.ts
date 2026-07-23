@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../../lib/supabase-server';
 import { assertOwnerCanWrite, resolveOwnerSubscription, assertItemEnabled } from '../../../../../lib/subscription';
 import { sendPushToUsers } from '../../../../../lib/push-send';
+import { bookAutoTransaction, reverseAutoTransaction } from '../../../../../lib/accounts';
 import crypto from 'crypto';
 
 // ==============================================================================
@@ -139,6 +140,30 @@ export async function PATCH(
       console.warn('paid_at not updated (run the paid_at migration to enable late detection):', paidAtError.message);
     } else if (updatedLedgerRecord) {
       (updatedLedgerRecord as any).paid_at = paidAtValue;
+    }
+
+    // 4d. Accounts automation (best-effort): when the OWNER confirms a bill as 'paid', book the
+    // amount as income into their default account; when they revert it to 'unpaid', remove that
+    // auto-entry. No-op if the owner hasn't got the Accounts add-on or hasn't set a default account.
+    // Never let a bookkeeping side-effect fail the status change that already succeeded.
+    if (ownerId && role === 'owner' && updatedLedgerRecord && paymentStatus !== 'sent') {
+      try {
+        if (paymentStatus === 'paid') {
+          await bookAutoTransaction(ownerId, {
+            direction: 'income',
+            amount: Number(updatedLedgerRecord.total_payable || 0),
+            propertyId: updatedLedgerRecord.property_id ?? null,
+            category: 'Rent',
+            txnDate: new Date().toISOString().slice(0, 10),
+            source: 'billing',
+            sourceRef: billingRecordId,
+          });
+        } else if (paymentStatus === 'unpaid') {
+          await reverseAutoTransaction(ownerId, 'billing', billingRecordId);
+        }
+      } catch (acctErr) {
+        console.error('[billing] accounts automation failed (non-fatal):', acctErr);
+      }
     }
 
     // 5. Return mutated clean state context mapping back to consumer client dashboard grids

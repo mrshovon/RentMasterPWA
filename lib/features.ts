@@ -18,13 +18,21 @@ import { resolveOwnerSubscription, type WriteGuardResult } from './subscription'
 // Kept generic (FeatureKey) so the next paid module drops in without reshaping any of this.
 // =====================================================================================
 
-export type FeatureKey = 'staff';
+export type FeatureKey = 'staff' | 'accounts';
 
-export const FEATURE_KEYS: FeatureKey[] = ['staff'];
+export const FEATURE_KEYS: FeatureKey[] = ['staff', 'accounts'];
 
 // Human-facing names, used in the 403 message the UI surfaces.
 const FEATURE_LABELS: Record<FeatureKey, string> = {
   staff: 'Staff management',
+  accounts: 'Accounts & bookkeeping',
+};
+
+// Which subscription_tiers column bundles each feature into a plan. A column per feature keeps
+// "which plans include X" editable from the admin console without a code change.
+const TIER_COLUMN: Record<FeatureKey, string> = {
+  staff: 'staff_included',
+  accounts: 'accounts_included',
 };
 
 export interface FeatureState {
@@ -38,29 +46,29 @@ export type FeatureMap = Record<FeatureKey, FeatureState>;
 const OFF: FeatureState = { enabled: false, source: null };
 
 /**
- * Does this tier bundle the Staff module?
+ * Does this tier bundle the given feature (via its subscription_tiers.<col> flag)?
  *
  * Queried here rather than joined into resolveOwnerSubscription on purpose: that function
  * ignores query errors and falls back to a Free state when it gets no row, so selecting a
  * column that doesn't exist yet would silently downgrade every paid owner to Free limits in
- * the window between deploying this code and running ADD_STAFF.sql. Keeping the dependency on
+ * the window between deploying this code and running the migration. Keeping the dependency on
  * the new column isolated in here means a pre-migration failure only turns the feature off.
  */
-async function tierIncludesStaff(tierId: string | null): Promise<boolean> {
+async function tierIncludes(tierId: string | null, column: string): Promise<boolean> {
   // 'free_tier' is both the sentinel resolveOwnerSubscription uses for a planless owner AND the
   // real free tier's id, so short-circuiting it costs nothing and enforces "the free tier never
   // bundles a paid module" outright. An admin can still grant it per-owner via owner_addons.
   if (!tierId || tierId === 'free_tier') return false;
   const { data, error } = await supabaseAdminEngine
     .from('subscription_tiers')
-    .select('staff_included')
+    .select(column)
     .eq('id', tierId)
     .maybeSingle();
   if (error) {
-    console.error('[features] subscription_tiers.staff_included lookup failed:', error.message);
+    console.error(`[features] subscription_tiers.${column} lookup failed:`, error.message);
     return false;
   }
-  return !!data?.staff_included;
+  return !!(data as any)?.[column];
 }
 
 /** Every enabled add-on key for an owner. Missing table/row => empty set (feature simply off). */
@@ -87,7 +95,10 @@ export async function resolveOwnerFeatures(ownerId: string): Promise<FeatureMap>
     resolveOwnerSubscription(ownerId),
     loadAddonKeys(ownerId),
   ]);
-  const staffInPlan = await tierIncludesStaff(sub.tierId);
+  // Whether each feature is bundled with the plan (one isolated, error-tolerant lookup per feature).
+  const inPlan = await Promise.all(
+    FEATURE_KEYS.map((key) => tierIncludes(sub.tierId, TIER_COLUMN[key]))
+  );
 
   const resolve = (key: FeatureKey, includedInPlan: boolean): FeatureState => {
     if (includedInPlan) return { enabled: true, source: 'plan' };
@@ -95,9 +106,10 @@ export async function resolveOwnerFeatures(ownerId: string): Promise<FeatureMap>
     return { ...OFF };
   };
 
-  return {
-    staff: resolve('staff', staffInPlan),
-  };
+  return FEATURE_KEYS.reduce((map, key, i) => {
+    map[key] = resolve(key, inPlan[i]);
+    return map;
+  }, {} as FeatureMap);
 }
 
 /** Resolve a single feature. */

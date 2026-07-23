@@ -41,15 +41,25 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
       .eq('addon_key', 'staff')
       .maybeSingle();
 
+    // Accounts add-on: same shape as staff (see lib/features.ts). Separate error-tolerant queries.
+    const { data: accountsAddonRow } = await supabaseAdminEngine
+      .from('owner_addons')
+      .select('enabled, granted_at')
+      .eq('owner_id', id)
+      .eq('addon_key', 'accounts')
+      .maybeSingle();
+
     let staffIncludedInPlan = false;
+    let accountsIncludedInPlan = false;
     const planTierId = (subscription as any)?.tier_id;
     if (planTierId) {
       const { data: tierRow } = await supabaseAdminEngine
         .from('subscription_tiers')
-        .select('staff_included')
+        .select('staff_included, accounts_included')
         .eq('id', planTierId)
         .maybeSingle();
       staffIncludedInPlan = !!tierRow?.staff_included;
+      accountsIncludedInPlan = !!tierRow?.accounts_included;
     }
 
     const { data: props } = await supabaseAdminEngine.from('properties').select('id').eq('owner_id', id);
@@ -80,6 +90,9 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
         staff_addon: !!staffAddonRow?.enabled,
         staff_addon_granted_at: staffAddonRow?.granted_at || null,
         staff_included_in_plan: staffIncludedInPlan,
+        accounts_addon: !!accountsAddonRow?.enabled,
+        accounts_addon_granted_at: accountsAddonRow?.granted_at || null,
+        accounts_included_in_plan: accountsIncludedInPlan,
         propertyCount: propertyIds.length,
         tenantCount,
       },
@@ -116,15 +129,18 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       return NextResponse.json({ success: true, message: action === 'revoke_permission' ? 'Management permissions revoked.' : 'Management permissions restored.' });
     }
 
-    // Paid add-on grant. Kept in owner_addons rather than user_metadata, which the owner
-    // can write themselves — see ADD_STAFF.sql / lib/features.ts.
-    if (action === 'enable_staff_addon' || action === 'disable_staff_addon') {
-      const enabled = action === 'enable_staff_addon';
+    // Paid add-on grants. Kept in owner_addons rather than user_metadata, which the owner
+    // can write themselves — see ADD_STAFF.sql / lib/features.ts. One generic handler per key.
+    const ADDON_LABELS: Record<string, string> = { staff: 'Staff', accounts: 'Accounts' };
+    const addonMatch = /^(enable|disable)_(staff|accounts)_addon$/.exec(action || '');
+    if (addonMatch) {
+      const enabled = addonMatch[1] === 'enable';
+      const addonKey = addonMatch[2];
       const { error } = await supabaseAdminEngine
         .from('owner_addons')
         .upsert({
           owner_id: id,
-          addon_key: 'staff',
+          addon_key: addonKey,
           enabled,
           granted_by: request.headers.get('x-rentmaster-uid'),
           granted_at: new Date().toISOString(),
@@ -132,7 +148,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       if (error) throw error;
       return NextResponse.json({
         success: true,
-        message: enabled ? 'Staff add-on enabled.' : 'Staff add-on disabled.',
+        message: `${ADDON_LABELS[addonKey]} add-on ${enabled ? 'enabled' : 'disabled'}.`,
       });
     }
 

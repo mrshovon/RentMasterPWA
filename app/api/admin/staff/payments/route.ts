@@ -4,6 +4,7 @@ import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { assertOwnerCanWrite } from '@/lib/subscription';
 import { assertFeature } from '@/lib/features';
 import { ownerId, ownsStaff, PAYMENT_METHODS } from '@/lib/staff';
+import { bookAutoTransaction } from '@/lib/accounts';
 import crypto from 'crypto';
 
 // =====================================================================================
@@ -95,6 +96,29 @@ export async function POST(request: NextRequest) {
     if (insertError) {
       console.error('[staff/payments] insert failed:', insertError);
       return NextResponse.json({ success: false, error: insertError.message }, { status: 500 });
+    }
+
+    // Accounts automation (best-effort): book this salary as an expense against the owner's default
+    // account, tagged to the staff member's property. No-op without the Accounts add-on / a default
+    // account. Never let a bookkeeping side-effect fail the payment that already succeeded.
+    try {
+      const { data: staffRow } = await supabaseAdminEngine
+        .from('staff')
+        .select('property_id')
+        .eq('id', staffId)
+        .eq('owner_id', uid)
+        .maybeSingle();
+      await bookAutoTransaction(uid, {
+        direction: 'expense',
+        amount,
+        propertyId: staffRow?.property_id ?? null,
+        category: 'Salary',
+        txnDate: paidOn,
+        source: 'staff_salary',
+        sourceRef: row.id,
+      });
+    } catch (acctErr) {
+      console.error('[staff/payments] accounts automation failed (non-fatal):', acctErr);
     }
 
     return NextResponse.json({ success: true, data: row }, { status: 201 });
