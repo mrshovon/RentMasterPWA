@@ -5,6 +5,16 @@ import { assertOwnerCanWrite } from '../../../../lib/subscription';
 import { sendPushToUsers, sendPushToRole } from '../../../../lib/push-send';
 import crypto from 'crypto';
 
+// Audiences a notice can address. See ADD_NOTICE_TARGETS.sql for the matching DB constraint.
+const VALID_SCOPES = [
+  'everyone', 'all_owners', 'all_tenants', 'individual_owner', 'individual_tenant',
+] as const;
+
+// Platform-wide audiences belong to the super-admin alone. An owner circulating to
+// 'all_tenants' reaches THEIR tenants only (enforced in the GET filter below); the other
+// scopes would cross owner boundaries, so owners may not use them at all.
+const ADMIN_ONLY_SCOPES: string[] = ['everyone', 'all_owners', 'individual_owner'];
+
 // =====================================================================================
 // 🚀 NOTICE DISPATCH ENGINE: RECORD BROADCAST ANNOUNCEMENTS (POST)
 // =====================================================================================
@@ -22,12 +32,14 @@ export async function POST(request: NextRequest) {
     if (!guard.ok) return NextResponse.json(guard.body, { status: guard.status });
 
     const bodyPayload = await request.json();
-    const { 
+    const {
       senderType, // 'owner' or 'system_admin'
-      targetScope, // 'all_tenants', 'individual_tenant', or 'all_owners'
-      targetTenantId, 
-      title, 
-      content 
+      // 'everyone' | 'all_owners' | 'all_tenants' | 'individual_owner' | 'individual_tenant'
+      targetScope,
+      targetTenantId,
+      targetOwnerId,
+      title,
+      content
     } = bodyPayload;
 
     // Boundary Validation Constraints Checks
@@ -35,8 +47,22 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Compulsory payload fields matching validation constraints missing.' }, { status: 400 });
     }
 
+    if (!(VALID_SCOPES as readonly string[]).includes(targetScope)) {
+      return NextResponse.json({ error: `Unknown target scope "${targetScope}".` }, { status: 400 });
+    }
+
+    // Platform-wide audiences are the super-admin's alone: an owner may only ever address their
+    // own tenants, never other owners or the whole tenant base.
+    if (ADMIN_ONLY_SCOPES.includes(targetScope) && role !== 'admin') {
+      return NextResponse.json({ error: 'Only a platform administrator can circulate to that audience.' }, { status: 403 });
+    }
+
     if (targetScope === 'individual_tenant' && !targetTenantId) {
       return NextResponse.json({ error: 'Target tenant ID must be provided when scope is mapped to an individual.' }, { status: 400 });
+    }
+
+    if (targetScope === 'individual_owner' && !targetOwnerId) {
+      return NextResponse.json({ error: 'Target owner ID must be provided when circulating to a single owner.' }, { status: 400 });
     }
 
     const noticeRecordId = crypto.randomUUID();
@@ -50,6 +76,7 @@ export async function POST(request: NextRequest) {
           sender_id: ownerId, // Maps the creating session identity safely
           target_scope: targetScope,
           target_tenant_id: targetScope === 'individual_tenant' ? targetTenantId : null,
+          target_owner_id: targetScope === 'individual_owner' ? targetOwnerId : null,
           title: title,
           content: content
         }
@@ -71,10 +98,23 @@ export async function POST(request: NextRequest) {
     try {
       if (targetScope === 'individual_tenant') {
         await sendPushToUsers([targetTenantId], { ...pushPayload, url: '/tenant' });
+      } else if (targetScope === 'individual_owner') {
+        await sendPushToUsers([targetOwnerId], { ...pushPayload, url: '/owner' });
       } else if (targetScope === 'all_tenants') {
-        await sendPushToRole('tenant', { ...pushPayload, url: '/tenant' });
+        // An owner's broadcast pushes to their own tenants; the admin's goes to every tenant.
+        if (role === 'admin') {
+          await sendPushToRole('tenant', { ...pushPayload, url: '/tenant' });
+        } else {
+          const { data: ownTenants } = await supabaseAdminEngine
+            .from('tenants').select('id').eq('owner_id', ownerId);
+          const ids = (ownTenants || []).map((t: { id: string }) => t.id);
+          if (ids.length) await sendPushToUsers(ids, { ...pushPayload, url: '/tenant' });
+        }
       } else if (targetScope === 'all_owners') {
         await sendPushToRole('owner', { ...pushPayload, url: '/owner' });
+      } else if (targetScope === 'everyone') {
+        await sendPushToRole('owner', { ...pushPayload, url: '/owner' });
+        await sendPushToRole('tenant', { ...pushPayload, url: '/tenant' });
       }
     } catch (pushErr) {
       console.error('[notices] push dispatch failed (non-fatal):', pushErr);
@@ -104,25 +144,67 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Context identity signature parameter extraction missing.' }, { status: 400 });
     }
 
-    let queryMatrixSelector = supabaseAdminEngine.from('notices').select('*');
+    // The audience filter, as a list of PostgREST `or` clauses. Kept as data (not applied
+    // straight onto the builder) so the pre-migration fallback below can drop one clause and
+    // re-run without rebuilding the whole query.
+    let clauses: string[] = [];
     let dynamicTraceLogContext = "";
+
+    const runQuery = (filter: string[]) =>
+      supabaseAdminEngine
+        .from('notices')
+        .select('*')
+        .or(filter.join(','))
+        .order('created_at', { ascending: false });
 
     // 🎯 CONDITIONAL SECURITY FILTER ROUTER SWITCH
     if (tenantId) {
-      // 🧑‍💻 TENANT SESSION ACTIVE: Must fetch notices targetted to ALL tenants or specifically them
+      // 🧑‍💻 TENANT SESSION ACTIVE: platform-wide admin bulletins, their OWN owner's broadcasts,
+      // and notices addressed to them individually.
       console.log(`[NOTICE GATEWAY] Fetching notices framework for tenant runtime profile identity: ${tenantId}`);
-      queryMatrixSelector = queryMatrixSelector.or(`target_scope.eq.all_tenants,and(target_scope.eq.individual_tenant,target_tenant_id.eq.${tenantId})`);
+
+      // Their owner, so an 'all_tenants' broadcast stays inside the building it was written for.
+      // Previously this matched every 'all_tenants' row regardless of sender, so one owner's
+      // announcement was readable by every other owner's tenants.
+      const { data: tenantRow } = await supabaseAdminEngine
+        .from('tenants').select('owner_id').eq('id', tenantId).maybeSingle();
+      const theirOwnerId = tenantRow?.owner_id ?? null;
+
+      clauses = [
+        'and(target_scope.eq.everyone,sender_type.eq.system_admin)',
+        'and(target_scope.eq.all_tenants,sender_type.eq.system_admin)',
+        `and(target_scope.eq.individual_tenant,target_tenant_id.eq.${tenantId})`,
+      ];
+      // Fail closed: with no resolvable owner, only the admin's platform bulletins are shown.
+      if (theirOwnerId) {
+        clauses.push(`and(target_scope.eq.all_tenants,sender_id.eq.${theirOwnerId})`);
+      }
       dynamicTraceLogContext = "Tenant Personalized System Bulletins Feed";
 
     } else if (ownerId) {
-      // 🏢 OWNER SESSION ACTIVE: Must pull notices issued BY them, or system wide bulletins issued to ALL owners by admin
+      // 🏢 OWNER SESSION ACTIVE: notices issued BY them, plus admin bulletins addressed to all
+      // owners, to everyone, or to this owner specifically.
       console.log(`[NOTICE GATEWAY] Fetching portfolio notices dashboard feed for owner runtime profile: ${ownerId}`);
-      queryMatrixSelector = queryMatrixSelector.or(`sender_id.eq.${ownerId},target_scope.eq.all_owners`);
+      clauses = [
+        `sender_id.eq.${ownerId}`,
+        'target_scope.eq.all_owners',
+        'target_scope.eq.everyone',
+        `and(target_scope.eq.individual_owner,target_owner_id.eq.${ownerId})`,
+      ];
       dynamicTraceLogContext = "Global Property Owner Bulletins Feed";
     }
 
-    const { data: processedNotices, error: fetchDatabaseException } = await queryMatrixSelector
-      .order('created_at', { ascending: false });
+    let { data: processedNotices, error: fetchDatabaseException } = await runQuery(clauses);
+
+    // Pre-migration grace: ADD_NOTICE_TARGETS.sql adds notices.target_owner_id. Until it has
+    // been run, referencing that column is a 42703 (undefined_column) — which would take the
+    // whole Notices tab down for every owner. Retry without the individual-owner clause so the
+    // feed keeps working, and say loudly what needs running.
+    if (fetchDatabaseException?.code === '42703' && /target_owner_id/.test(fetchDatabaseException.message || '')) {
+      console.error('[notices] notices.target_owner_id is missing — run ADD_NOTICE_TARGETS.sql. Serving the feed without owner-targeted notices.');
+      ({ data: processedNotices, error: fetchDatabaseException } =
+        await runQuery(clauses.filter((c) => !c.includes('target_owner_id'))));
+    }
 
     if (fetchDatabaseException) {
       console.error('Supabase Notice Framework Stream Failure Error Exception:', fetchDatabaseException);

@@ -92,6 +92,10 @@ export async function PATCH(
             sender_type: 'tenant',
             sender_id: updatedLedgerRecord.created_by_owner, // routes into the owner's notice feed
             target_scope: 'individual_owner',
+            // Names the addressee explicitly. sender_id already routes this into the owner's
+            // feed, but 'individual_owner' now means "target_owner_id is who this is for"
+            // (see ADD_NOTICE_TARGETS.sql — the DB constraint requires it).
+            target_owner_id: updatedLedgerRecord.created_by_owner,
             target_tenant_id: updatedLedgerRecord.tenant_id,
             title: 'Rent payment marked as sent',
             content: `${tenantName} marked the rent for ${monthLabel} (৳${amount}) as sent. Please verify the payment and confirm receipt.`,

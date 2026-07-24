@@ -40,5 +40,27 @@ export async function setSetting(key: string, value: unknown): Promise<void> {
 
 export const getPaymentConfig = () => getSetting<PaymentConfig>('payment_config', DEFAULT_PAYMENT_CONFIG);
 
+// -------------------------------------------------------------------------------------
+// MAINTENANCE MODE — admin-declared downtime window. When enabled, owners and tenants get a
+// blocking modal on app open; the super-admin is never blocked (they have to be able to turn
+// it back off). Times are ISO 8601 strings, or null for "no stated start/end".
+// -------------------------------------------------------------------------------------
+export interface MaintenanceMode {
+  enabled: boolean;
+  startAt: string | null;
+  endAt: string | null;
+  message: string;
+}
+
+export const DEFAULT_MAINTENANCE_MODE: MaintenanceMode = {
+  enabled: false,
+  startAt: null,
+  endAt: null,
+  message: '',
+};
+
+export const getMaintenanceMode = () =>
+  getSetting<MaintenanceMode>('maintenance_mode', DEFAULT_MAINTENANCE_MODE);
+
 // The tier id given to newly self-signed-up owners. Empty/absent => implicit free (no history row).
 export const getDefaultSignupTier = () => getSetting<{ tierId: string }>('default_signup_tier', { tierId: '' });
