@@ -186,6 +186,20 @@ export default async function middleware(request: NextRequest) {
     );
   }
 
+  // 3. Ungated API routes (/api/app/*) still need CORS.
+  // This used to fall straight through to NextResponse.next() with no Access-Control-Allow-Origin,
+  // and the UI is a different origin (separate Vercel project) — so the browser threw every
+  // response away before any handler saw it. /api/auth/* only escaped that because those five
+  // routes each hardcode their own '*' header. Two features were silently dead as a result:
+  // the maintenance gate (which fails open, so a blocked read looked exactly like "no window")
+  // and the cached latest-release proxy (which falls back to api.github.com, i.e. straight into
+  // the per-IP rate limit it exists to avoid).
+  if (currentPath.startsWith('/api/')) {
+    const publicResponse = NextResponse.next();
+    Object.entries(corsHeaders).forEach(([k, v]) => publicResponse.headers.set(k, v));
+    return publicResponse;
+  }
+
   return NextResponse.next();
 }
 

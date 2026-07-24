@@ -90,3 +90,79 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: runtimeExceptionCatch.message || 'Fatal Server Logic Exception.' }, { status: 500 });
   }
 }
+
+// =====================================================================================
+// ✏️ TENANT SELF-EDIT — the signed-in tenant updates their own details.
+// PATCH { name?, familyMembers? }
+//
+// STRICT ALLOWLIST, and it must stay that way. This is the only tenant-writable path into the
+// tenants table, so it is exactly where the owner-controlled terms would leak if the body were
+// spread onto the update. Everything else is refused by construction, not by validation:
+//   * phone          — the tenant's LOGIN identity (login matches phone + passcode, and expects
+//                      a single row). Owner-managed on purpose; a self-service change could
+//                      collide with another tenant and lock both of them out.
+//   * monthly_rent, service_charge, advance_amount, due_date, rented_date — financial terms
+//                      set by the owner; a tenant editing their own rent is the obvious abuse.
+//   * property_id, owner_id, allow_login_unassigned — tenancy/access wiring.
+//   * password_hash, nid_hash — credentials.
+// =====================================================================================
+const MAX_TENANT_NAME_LEN = 120;
+
+export async function PATCH(request: NextRequest) {
+  try {
+    const tenantId = request.headers.get('x-rentmaster-tenant-id');
+    if (!tenantId) {
+      return NextResponse.json({ error: 'Tenant identity signature missing from request context.' }, { status: 400 });
+    }
+
+    // Same eviction gate as the GET: a tenant whose access was revoked must not be able to write.
+    const { data: existing, error: readError } = await supabaseAdminEngine
+      .from('tenants')
+      .select('id, property_id, allow_login_unassigned')
+      .eq('id', tenantId)
+      .single();
+    if (readError) {
+      return NextResponse.json({ error: readError.message }, { status: 500 });
+    }
+    if (isTenantLoginBlocked(existing as any)) {
+      return NextResponse.json({ error: TENANT_BLOCKED_MESSAGE, code: 'LOGIN_BLOCKED' }, { status: 403 });
+    }
+
+    const body = await request.json();
+    const updates: Record<string, any> = {};
+
+    if (typeof body.name === 'string') {
+      const name = body.name.trim().slice(0, MAX_TENANT_NAME_LEN);
+      if (!name) return NextResponse.json({ error: 'Name cannot be empty.' }, { status: 400 });
+      updates.name = name;
+    }
+
+    if (body.familyMembers !== undefined && body.familyMembers !== null && body.familyMembers !== '') {
+      const members = Number(body.familyMembers);
+      if (!Number.isInteger(members) || members < 0 || members > 99) {
+        return NextResponse.json({ error: 'Family members must be a whole number between 0 and 99.' }, { status: 400 });
+      }
+      updates.family_members = members;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return NextResponse.json({ error: 'Provide a name and/or family members to update.' }, { status: 400 });
+    }
+
+    const { data: updatedTenant, error: updateError } = await supabaseAdminEngine
+      .from('tenants')
+      .update(updates)
+      .eq('id', tenantId)
+      .select('id, name, phone, family_members')
+      .single();
+    if (updateError) {
+      console.error('Tenant self-edit update error:', updateError);
+      return NextResponse.json({ error: updateError.message }, { status: 500 });
+    }
+
+    return NextResponse.json({ success: true, data: updatedTenant }, { status: 200 });
+  } catch (runtimeExceptionCatch: any) {
+    console.error('Fatal Pipeline Execution Tenant Self-Edit Route Crash:', runtimeExceptionCatch);
+    return NextResponse.json({ error: runtimeExceptionCatch.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  }
+}
