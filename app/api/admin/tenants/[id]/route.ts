@@ -4,6 +4,7 @@ import { supabaseAdminEngine } from '../../../../../lib/supabase-server';
 import { assertOwnerCanWrite, resolveOwnerSubscription, assertItemEnabled } from '../../../../../lib/subscription';
 import { generatePasscode, hashPasscode } from '../../../../../lib/passcode';
 import { encryptField, hasEncryptionKey } from '../../../../../lib/field-crypto';
+import { shapeTenantForOwner } from '../../../../../lib/tenants';
 
 // ==============================================================================
 // 🚀 TENANT MUTATOR: edit tenant details / revise rent. A rent change is journaled
@@ -185,7 +186,10 @@ export async function PATCH(
       }
     }
 
-    return NextResponse.json({ success: true, data: updated }, { status: 200 });
+    // Same shape as the list GET: the client merges this into its state with a spread, so a
+    // response missing `nid` would leave the stale value in place — which is exactly why a
+    // freshly saved NID kept reading as blank until a page reload.
+    return NextResponse.json({ success: true, data: shapeTenantForOwner(updated) }, { status: 200 });
 
   } catch (runtimeExceptionCatch: any) {
     console.error('Fatal Pipeline Execution Tenant PATCH Route Crash:', runtimeExceptionCatch);

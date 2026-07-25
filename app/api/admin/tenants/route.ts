@@ -3,7 +3,8 @@ import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../lib/supabase-server';
 import { resolveOwnerSubscription, assertOwnerCanWrite, checkCreateLimit, assertItemEnabled } from '../../../../lib/subscription';
 import { generatePasscode, hashPasscode } from '../../../../lib/passcode';
-import { encryptField, decryptField, hasEncryptionKey } from '../../../../lib/field-crypto';
+import { encryptField, hasEncryptionKey } from '../../../../lib/field-crypto';
+import { shapeTenantForOwner } from '../../../../lib/tenants';
 import crypto from 'crypto';
 
 
@@ -37,15 +38,10 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: fetchError.message }, { status: 500 });
     }
 
-    // Shape the rows for the owner's client:
-    //  - nid: decrypted so the owner can read and correct what they entered (null for tenants
-    //    onboarded before this existed — the old nid_hash is one-way and unrecoverable);
-    //  - the credential columns are stripped. select('*') was shipping password_hash and the
-    //    legacy nid_hash to the browser, which nothing renders and nothing should receive.
-    const shaped = (tenantsList || []).map((row: any) => {
-      const { password_hash, nid_hash, nid_encrypted, ...rest } = row;
-      return { ...rest, nid: decryptField(nid_encrypted) };
-    });
+    // NID decrypted so the owner can read and correct what they entered; credential columns
+    // stripped (select('*') was shipping password_hash and the legacy nid_hash to the browser).
+    // Shared with the PATCH route so the two responses can never drift — see lib/tenants.ts.
+    const shaped = (tenantsList || []).map(shapeTenantForOwner);
 
     return NextResponse.json({ success: true, count: shaped.length, data: shaped }, { status: 200 });
 
