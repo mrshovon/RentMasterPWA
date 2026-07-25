@@ -33,11 +33,14 @@ export async function PATCH(
     const guard = await assertOwnerCanWrite(role, ownerId);
     if (!guard.ok) return NextResponse.json(guard.body, { status: guard.status });
 
-    // Owner can't toggle a bill belonging to a disabled (over-limit) tenant.
+    // Owner can't toggle a bill belonging to a disabled (over-limit) tenant. The prior status is
+    // read here too, so a pure payment-date edit (paid -> paid) can skip the "confirmed" push.
+    let previousPaymentStatus: string | null = null;
     if (role === 'owner') {
       const { data: led } = await supabaseAdminEngine
-        .from('billing_ledgers').select('tenant_id, property_id').eq('id', billingRecordId).maybeSingle();
+        .from('billing_ledgers').select('tenant_id, property_id, payment_status').eq('id', billingRecordId).maybeSingle();
       if (led) {
+        previousPaymentStatus = led.payment_status ?? null;
         const sub = await resolveOwnerSubscription(ownerId);
         const itemGuard = await assertItemEnabled(role, ownerId, sub, { tenantId: led.tenant_id, propertyId: led.property_id });
         if (!itemGuard.ok) return NextResponse.json(itemGuard.body, { status: itemGuard.status });
@@ -51,6 +54,22 @@ export async function PATCH(
     if (!paymentStatus || !['paid', 'unpaid','sent'].includes(paymentStatus)) {
       return NextResponse.json({ error: 'Invalid mutation payload criteria. Value must strictly match paid, unpaid or sent configurations.' }, { status: 400 });
     }
+
+    // 3a. Optional owner-supplied payment date ('YYYY-MM-DD'). This is what makes back-dated entry
+    // honest: without it, an invoice for an earlier month recorded today looks LATE on the receipt
+    // even though the tenant paid on time. Absent -> today, so older clients keep working.
+    // Tenants never reach this (they're pinned to 'sent' below).
+    const todayIsoDay = new Date().toISOString().slice(0, 10);
+    const paidOn = bodyPayload.paidOn ? String(bodyPayload.paidOn).slice(0, 10) : '';
+    if (paidOn && !callerTenantId) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(paidOn) || Number.isNaN(Date.parse(paidOn))) {
+        return NextResponse.json({ error: 'Invalid payment date. Expected YYYY-MM-DD.' }, { status: 400 });
+      }
+      if (paidOn > todayIsoDay) {
+        return NextResponse.json({ error: 'Payment date cannot be in the future.' }, { status: 400 });
+      }
+    }
+    const effectivePaidOn = (!callerTenantId && paidOn) ? paidOn : todayIsoDay;
 
     // 3b. Tenant governance: a tenant may only flag their OWN bill as 'sent'.
     if (callerTenantId && paymentStatus !== 'sent') {
@@ -119,8 +138,9 @@ export async function PATCH(
       }
     }
 
-    // 4b-ii. Owner confirmed the payment — tell the tenant their bill is settled.
-    if (paymentStatus === 'paid' && ownerId && updatedLedgerRecord) {
+    // 4b-ii. Owner confirmed the payment — tell the tenant their bill is settled. Skipped when the
+    // bill was ALREADY paid, so correcting the payment date doesn't buzz the tenant a second time.
+    if (paymentStatus === 'paid' && ownerId && updatedLedgerRecord && previousPaymentStatus !== 'paid') {
       try {
         await sendPushToUsers([updatedLedgerRecord.tenant_id], {
           title: 'Payment confirmed',
@@ -133,9 +153,13 @@ export async function PATCH(
       }
     }
 
-    // 4c. Best-effort payment timestamp for receipts (requires the billing_ledgers.paid_at
-    // migration). If the column is absent the status change above still succeeds.
-    const paidAtValue = paymentStatus === 'paid' ? new Date().toISOString() : null;
+    // 4c. Best-effort payment timestamp for receipts (requires ADD_BILLING_PAID_AT.sql). If the
+    // column is absent the status change above still succeeds.
+    // Stored at 12:00 UTC rather than midnight so the calendar day can't slip backwards when it's
+    // read in Bangladesh (UTC+6) or anywhere else — the receipt only ever cares about the day.
+    const paidAtValue = paymentStatus === 'paid'
+      ? new Date(`${effectivePaidOn}T12:00:00.000Z`).toISOString()
+      : null;
     const { error: paidAtError } = await supabaseAdminEngine
       .from('billing_ledgers')
       .update({ paid_at: paidAtValue })
@@ -158,7 +182,10 @@ export async function PATCH(
             amount: Number(updatedLedgerRecord.total_payable || 0),
             propertyId: updatedLedgerRecord.property_id ?? null,
             category: 'Rent',
-            txnDate: new Date().toISOString().slice(0, 10),
+            // The date the owner says the money arrived, so back-dated rent books into the month it
+            // was actually received. bookAutoTransaction is idempotent on (source, source_ref), so
+            // correcting the date moves the existing row instead of adding a second one.
+            txnDate: effectivePaidOn,
             source: 'billing',
             sourceRef: billingRecordId,
           });
