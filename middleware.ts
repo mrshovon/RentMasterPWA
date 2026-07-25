@@ -54,7 +54,7 @@ export default async function middleware(request: NextRequest) {
     const MAX_ALLOWED_PAYLOAD_LIMIT = (isUploadRoute ? 8 : 2) * 1024 * 1024; // 8MB uploads / 2MB default
     if (contentLengthBytes > MAX_ALLOWED_PAYLOAD_LIMIT) {
       return NextResponse.json(
-        { error: 'Payload Limit Exceeded. Max 2MB allowed.' },
+        { error: `Payload Limit Exceeded. Max ${isUploadRoute ? 8 : 2}MB allowed.` },
         { status: 413, headers: corsHeaders }
       );
     }

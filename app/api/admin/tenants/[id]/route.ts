@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../../lib/supabase-server';
 import { assertOwnerCanWrite, resolveOwnerSubscription, assertItemEnabled } from '../../../../../lib/subscription';
 import { generatePasscode, hashPasscode } from '../../../../../lib/passcode';
+import { encryptField, hasEncryptionKey } from '../../../../../lib/field-crypto';
 
 // ==============================================================================
 // 🚀 TENANT MUTATOR: edit tenant details / revise rent. A rent change is journaled
@@ -34,7 +35,7 @@ export async function PATCH(
     const body = await request.json();
     const {
       name, phone, monthlyRent, serviceCharge, advanceAmount, dueDate, familyMembers, propertyId,
-      allowLoginUnassigned,
+      allowLoginUnassigned, nid, rentedDate,
     } = body;
 
     // 1. Load current record for a governance check and old_rent capture. Ownership is
@@ -75,6 +76,22 @@ export async function PATCH(
     if (familyMembers !== undefined) updates.family_members = parseInt(familyMembers, 10);
     // Owner's override letting an unassigned tenant keep portal access (see lib/tenant-access.ts).
     if (allowLoginUnassigned !== undefined) updates.allow_login_unassigned = !!allowLoginUnassigned;
+    // Move-in date: offered at onboarding but previously unreachable afterwards, so a wrong one
+    // could never be fixed.
+    if (rentedDate !== undefined) updates.rented_date = String(rentedDate || '').trim() || null;
+
+    // National ID. Encrypted (never hashed) so the owner can read back and correct what they
+    // entered; clearing the field removes it. A missing key is refused rather than silently
+    // storing nothing — see lib/field-crypto.ts.
+    if (nid !== undefined) {
+      const trimmedNid = String(nid ?? '').trim();
+      if (trimmedNid && !hasEncryptionKey()) {
+        return NextResponse.json({
+          error: 'Cannot store the National ID: NID_ENCRYPTION_KEY is not configured on the server.',
+        }, { status: 500 });
+      }
+      updates.nid_encrypted = trimmedNid ? encryptField(trimmedNid) : null;
+    }
 
     // 2b. Property (re)assignment. A null/empty propertyId unassigns the tenant (they
     // keep their record and history); a new id moves them. The unit they leave is freed

@@ -64,7 +64,7 @@ export async function POST(request: NextRequest) {
     const role = request.headers.get('x-rentmaster-role');
 
     const bodyPayload = await request.json();
-    const { name, address, flatNo } = bodyPayload;
+    const { name, address, flatNo, receiptName } = bodyPayload;
 
     if (!name || !address || !flatNo) {
       return NextResponse.json({ error: 'Validation missing compulsory payload blocks.' }, { status: 400 });
@@ -96,6 +96,9 @@ export async function POST(request: NextRequest) {
           name: name,
           address: address,
           flat_no: flatNo,
+          // Optional. Null means "print my account name", which is what every receipt did before
+          // this existed.
+          receipt_name: String(receiptName ?? '').trim() || null,
           owner_phone: ownerPhone,
           is_vacant: true
         }

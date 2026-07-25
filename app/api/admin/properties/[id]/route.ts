@@ -30,7 +30,7 @@ export async function PATCH(
     if (!itemGuard.ok) return NextResponse.json(itemGuard.body, { status: itemGuard.status });
 
     const body = await request.json();
-    const { name, address, flatNo, vacate } = body;
+    const { name, address, flatNo, vacate, receiptName } = body;
 
     // ---------------------------------------------------------------------------
     // MODE A — Vacate: snapshot each current occupant into property_occupancy_history,
@@ -43,12 +43,13 @@ export async function PATCH(
         .eq('property_id', propertyId);
 
       for (const occ of occupants || []) {
-        const { data: paidLedgers } = await supabaseAdminEngine
+        // Sum what was actually RECEIVED across every invoice, not the face value of the ones
+        // marked paid — a partly-paid invoice contributes the part that was paid.
+        const { data: ledgerRows } = await supabaseAdminEngine
           .from('billing_ledgers')
-          .select('total_payable')
-          .eq('tenant_id', occ.id)
-          .eq('payment_status', 'paid');
-        const totalRentPaid = (paidLedgers || []).reduce((s, l) => s + Number(l.total_payable || 0), 0);
+          .select('amount_paid')
+          .eq('tenant_id', occ.id);
+        const totalRentPaid = (ledgerRows || []).reduce((s, l) => s + Number(l.amount_paid || 0), 0);
 
         const { error: archiveError } = await supabaseAdminEngine
           .from('property_occupancy_history')
@@ -99,6 +100,8 @@ export async function PATCH(
     if (name !== undefined) updates.name = name;
     if (address !== undefined) updates.address = address;
     if (flatNo !== undefined) updates.flat_no = flatNo;
+    // Cleared back to null = fall back to the owner's account name on this property's receipts.
+    if (receiptName !== undefined) updates.receipt_name = String(receiptName ?? '').trim() || null;
 
     if (Object.keys(updates).length === 0) {
       return NextResponse.json({ error: 'No editable fields supplied.' }, { status: 400 });

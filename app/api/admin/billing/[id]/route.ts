@@ -4,10 +4,19 @@ import { supabaseAdminEngine } from '../../../../../lib/supabase-server';
 import { assertOwnerCanWrite, resolveOwnerSubscription, assertItemEnabled } from '../../../../../lib/subscription';
 import { sendPushToUsers } from '../../../../../lib/push-send';
 import { bookAutoTransaction, reverseAutoTransaction } from '../../../../../lib/accounts';
+import { ownedLedger, recalcLedger, balanceOf } from '../../../../../lib/billing';
 import crypto from 'crypto';
 
 // ==============================================================================
 // 🚀 TRANSACTION MUTATOR: INDIVIDUAL INVOICE LEDGER STATUS STATUS PATCH HANDLER
+//
+// Since rent can be paid in installments, 'paid' and 'unpaid' are no longer stored directly —
+// they are shorthands for editing the billing_payments log, after which recalcLedger() derives
+// the real status:
+//   'paid'   -> record one payment covering whatever balance is left ("settle in full")
+//   'unpaid' -> delete every recorded payment ("I entered this by mistake")
+// Only 'sent' is still a status the caller writes, because it is a tenant's claim about money
+// rather than a record of money received. 'partial' is never accepted here — it is derived.
 // ==============================================================================
 export async function PATCH(
   request: NextRequest,
@@ -76,25 +85,100 @@ export async function PATCH(
       return NextResponse.json({ error: 'Tenants may only mark a bill as sent; owner confirmation is required for other states.' }, { status: 403 });
     }
 
-    // 4. Update the ledger, scoped strictly to the caller's own data:
-    //    - tenant callers: only their own bill (tenant_id), never another tenant's;
-    //    - owner callers: only bills they created (created_by_owner).
-    let mutationQuery = supabaseAdminEngine
-      .from('billing_ledgers')
-      .update({ payment_status: paymentStatus })
-      .eq('id', billingRecordId);
-    if (callerTenantId) {
-      mutationQuery = mutationQuery.eq('tenant_id', callerTenantId);
-    } else {
-      mutationQuery = mutationQuery.eq('created_by_owner', ownerId);
-    }
-    const { data: updatedLedgerRecord, error: mutationDatabaseException } = await mutationQuery
-      .select('*, tenants:tenant_id (name)')
-      .single();
+    // 4. Apply the change. 'paid' and 'unpaid' go through the payment log so the derived status,
+    // the amount paid and the receipt's payment history can never disagree with each other.
+    let updatedLedgerRecord: any = null;
 
-    if (mutationDatabaseException) {
-      console.error('Supabase Mutation Ledger Registry Fail:', mutationDatabaseException);
-      return NextResponse.json({ error: mutationDatabaseException.message }, { status: 500 });
+    if (!callerTenantId && (paymentStatus === 'paid' || paymentStatus === 'unpaid')) {
+      const ledger = await ownedLedger(billingRecordId, ownerId as string);
+      if (!ledger) {
+        return NextResponse.json({ error: 'Invoice not found.' }, { status: 404 });
+      }
+
+      if (paymentStatus === 'paid') {
+        // Settle in full: one payment for whatever is still owed. Already settled -> nothing to
+        // add, rather than a duplicate row that would double the owner's income.
+        const balance = balanceOf(ledger);
+        if (balance > 0) {
+          const { data: payment, error: payErr } = await supabaseAdminEngine
+            .from('billing_payments')
+            .insert([{
+              id: crypto.randomUUID(),
+              ledger_id: billingRecordId,
+              owner_id: ownerId,
+              tenant_id: ledger.tenant_id,
+              amount: balance,
+              paid_on: effectivePaidOn,
+              method: 'cash',
+              note: null,
+            }])
+            .select('id')
+            .single();
+          if (payErr) {
+            console.error('[billing] settle-in-full insert failed:', payErr);
+            return NextResponse.json({ error: payErr.message }, { status: 500 });
+          }
+          try {
+            await bookAutoTransaction(ownerId as string, {
+              direction: 'income',
+              amount: balance,
+              propertyId: ledger.property_id ?? null,
+              category: 'Rent',
+              txnDate: effectivePaidOn,
+              source: 'billing',
+              sourceRef: payment.id,
+            });
+          } catch (acctErr) {
+            console.error('[billing] accounts automation failed (non-fatal):', acctErr);
+          }
+        }
+      } else {
+        // Clear the record: drop every installment, reversing each one's income row.
+        const { data: existing } = await supabaseAdminEngine
+          .from('billing_payments')
+          .select('id')
+          .eq('ledger_id', billingRecordId)
+          .eq('owner_id', ownerId as string);
+        for (const p of existing || []) {
+          try {
+            await reverseAutoTransaction(ownerId as string, 'billing', p.id);
+          } catch (acctErr) {
+            console.error('[billing] accounts reversal failed (non-fatal):', acctErr);
+          }
+        }
+        const { error: delErr } = await supabaseAdminEngine
+          .from('billing_payments')
+          .delete()
+          .eq('ledger_id', billingRecordId)
+          .eq('owner_id', ownerId as string);
+        if (delErr) {
+          console.error('[billing] clearing payments failed:', delErr);
+          return NextResponse.json({ error: delErr.message }, { status: 500 });
+        }
+      }
+
+      updatedLedgerRecord = await recalcLedger(billingRecordId);
+    } else {
+      // 'sent' — a claim, not a record of money. Written directly, scoped strictly to the
+      // caller's own data: tenant callers only their own bill, owners only bills they created.
+      let mutationQuery = supabaseAdminEngine
+        .from('billing_ledgers')
+        .update({ payment_status: paymentStatus })
+        .eq('id', billingRecordId);
+      if (callerTenantId) {
+        mutationQuery = mutationQuery.eq('tenant_id', callerTenantId);
+      } else {
+        mutationQuery = mutationQuery.eq('created_by_owner', ownerId);
+      }
+      const { data, error: mutationDatabaseException } = await mutationQuery
+        .select('*, tenants:tenant_id (name)')
+        .single();
+
+      if (mutationDatabaseException) {
+        console.error('Supabase Mutation Ledger Registry Fail:', mutationDatabaseException);
+        return NextResponse.json({ error: mutationDatabaseException.message }, { status: 500 });
+      }
+      updatedLedgerRecord = data;
     }
 
     // 4b. Side-effect: when a TENANT flags rent as 'sent', drop an in-app notice into
@@ -102,7 +186,8 @@ export async function PATCH(
     if (paymentStatus === 'sent' && callerTenantId && updatedLedgerRecord) {
       const tenantName = (updatedLedgerRecord as any).tenants?.name || 'A tenant';
       const monthLabel = updatedLedgerRecord.billing_month;
-      const amount = updatedLedgerRecord.total_payable;
+      // What they still owe, not the invoice total — the owner may already have recorded part of it.
+      const amount = balanceOf(updatedLedgerRecord);
       const { error: noticeError } = await supabaseAdminEngine
         .from('notices')
         .insert([
@@ -153,49 +238,9 @@ export async function PATCH(
       }
     }
 
-    // 4c. Best-effort payment timestamp for receipts (requires ADD_BILLING_PAID_AT.sql). If the
-    // column is absent the status change above still succeeds.
-    // Stored at 12:00 UTC rather than midnight so the calendar day can't slip backwards when it's
-    // read in Bangladesh (UTC+6) or anywhere else — the receipt only ever cares about the day.
-    const paidAtValue = paymentStatus === 'paid'
-      ? new Date(`${effectivePaidOn}T12:00:00.000Z`).toISOString()
-      : null;
-    const { error: paidAtError } = await supabaseAdminEngine
-      .from('billing_ledgers')
-      .update({ paid_at: paidAtValue })
-      .eq('id', billingRecordId);
-    if (paidAtError) {
-      console.warn('paid_at not updated (run the paid_at migration to enable late detection):', paidAtError.message);
-    } else if (updatedLedgerRecord) {
-      (updatedLedgerRecord as any).paid_at = paidAtValue;
-    }
-
-    // 4d. Accounts automation (best-effort): when the OWNER confirms a bill as 'paid', book the
-    // amount as income into their default account; when they revert it to 'unpaid', remove that
-    // auto-entry. No-op if the owner hasn't got the Accounts add-on or hasn't set a default account.
-    // Never let a bookkeeping side-effect fail the status change that already succeeded.
-    if (ownerId && role === 'owner' && updatedLedgerRecord && paymentStatus !== 'sent') {
-      try {
-        if (paymentStatus === 'paid') {
-          await bookAutoTransaction(ownerId, {
-            direction: 'income',
-            amount: Number(updatedLedgerRecord.total_payable || 0),
-            propertyId: updatedLedgerRecord.property_id ?? null,
-            category: 'Rent',
-            // The date the owner says the money arrived, so back-dated rent books into the month it
-            // was actually received. bookAutoTransaction is idempotent on (source, source_ref), so
-            // correcting the date moves the existing row instead of adding a second one.
-            txnDate: effectivePaidOn,
-            source: 'billing',
-            sourceRef: billingRecordId,
-          });
-        } else if (paymentStatus === 'unpaid') {
-          await reverseAutoTransaction(ownerId, 'billing', billingRecordId);
-        }
-      } catch (acctErr) {
-        console.error('[billing] accounts automation failed (non-fatal):', acctErr);
-      }
-    }
+    // NOTE: paid_at and the Accounts income row are NOT written here. recalcLedger() owns the
+    // former and the payment log owns the latter — one income row per installment, booked on that
+    // installment's own date. See lib/billing.ts.
 
     // 5. Return mutated clean state context mapping back to consumer client dashboard grids
     return NextResponse.json({

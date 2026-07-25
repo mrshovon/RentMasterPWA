@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../lib/supabase-server';
 import { resolveOwnerSubscription, assertOwnerCanWrite, checkCreateLimit, assertItemEnabled } from '../../../../lib/subscription';
 import { generatePasscode, hashPasscode } from '../../../../lib/passcode';
+import { encryptField, decryptField, hasEncryptionKey } from '../../../../lib/field-crypto';
 import crypto from 'crypto';
 
 
@@ -36,7 +37,17 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: fetchError.message }, { status: 500 });
     }
 
-    return NextResponse.json({ success: true, count: tenantsList.length, data: tenantsList }, { status: 200 });
+    // Shape the rows for the owner's client:
+    //  - nid: decrypted so the owner can read and correct what they entered (null for tenants
+    //    onboarded before this existed — the old nid_hash is one-way and unrecoverable);
+    //  - the credential columns are stripped. select('*') was shipping password_hash and the
+    //    legacy nid_hash to the browser, which nothing renders and nothing should receive.
+    const shaped = (tenantsList || []).map((row: any) => {
+      const { password_hash, nid_hash, nid_encrypted, ...rest } = row;
+      return { ...rest, nid: decryptField(nid_encrypted) };
+    });
+
+    return NextResponse.json({ success: true, count: shaped.length, data: shaped }, { status: 200 });
 
   } catch (runtimeExceptionCatch: any) {
     console.error('Pipeline Execution Tenants GET Critical Route Crash:', runtimeExceptionCatch);
@@ -88,7 +99,18 @@ export async function POST(request: NextRequest) {
     const tenantId = crypto.randomUUID();
     const rawPasscode = generatePasscode();
     const dummyPasswordHash = hashPasscode(rawPasscode);
-    const nidHash = nid ? crypto.createHash('sha256').update(String(nid)).digest('hex') : null;
+
+    // The NID is ENCRYPTED, not hashed: the owner has to be able to read back what they typed to
+    // confirm it or fix a typo. Hashing made it permanently unreadable and so uneditable.
+    // A missing key is reported, never swallowed — silently dropping an NID the owner believes
+    // they saved is worse than refusing the write.
+    const trimmedNid = String(nid ?? '').trim();
+    if (trimmedNid && !hasEncryptionKey()) {
+      return NextResponse.json({
+        error: 'Cannot store the National ID: NID_ENCRYPTION_KEY is not configured on the server.',
+      }, { status: 500 });
+    }
+    const nidEncrypted = trimmedNid ? encryptField(trimmedNid) : null;
     // 2. Register operational metrics target inside public.tenants table schema
     const { data: tenantRecord, error: tenantInsertError } = await supabaseAdminEngine
       .from('tenants')
@@ -100,7 +122,7 @@ export async function POST(request: NextRequest) {
           name: name,
           phone: phone,
           family_members: familyMembers || 1,
-          nid_hash: nidHash || null,
+          nid_encrypted: nidEncrypted,
           password_hash: dummyPasswordHash || null,
           monthly_rent: parseFloat(monthlyRent),
           due_date: parseInt(dueDate),

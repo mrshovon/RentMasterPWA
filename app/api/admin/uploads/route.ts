@@ -11,7 +11,12 @@ import crypto from 'crypto';
 // =====================================================================================
 const STORAGE_BUCKET = 'RentMasterProDocs';
 const MAX_FILE_BYTES = 8 * 1024 * 1024; // 8MB — mirrors the middleware cap for this path
-const ALLOWED_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif'];
+const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif'];
+// PDFs are allowed for TENANT DOCUMENTS only — deeds, agreements and receipts arrive as PDFs far
+// more often than as photos. Every other surface stays image-only on purpose: a PDF uploaded as
+// the owner's signature or as the bKash QR would render as a broken image on the receipt and the
+// payment screen, and neither of those has a client-side type check to stop it getting that far.
+const PDF_FOLDERS = ['documents'];
 
 export async function POST(request: NextRequest) {
   try {
@@ -35,16 +40,21 @@ export async function POST(request: NextRequest) {
 
     const blob = file as File;
 
-    if (!ALLOWED_TYPES.includes(blob.type)) {
-      return NextResponse.json({ error: `Unsupported file type '${blob.type}'. Images only (png, jpg, webp, gif).` }, { status: 400 });
+    // Optional caller-provided sub-folder (defaults to a generic bucket path). Resolved BEFORE
+    // the type check, because what counts as an acceptable type depends on it.
+    const folderRaw = (formData.get('folder') as string) || 'maintenance';
+    const folder = folderRaw.replace(/[^a-z0-9_-]/gi, '') || 'maintenance';
+
+    const pdfAllowed = PDF_FOLDERS.includes(folder);
+    const allowedTypes = pdfAllowed ? [...IMAGE_TYPES, 'application/pdf'] : IMAGE_TYPES;
+
+    if (!allowedTypes.includes(blob.type)) {
+      const accepted = pdfAllowed ? 'PDF or images (png, jpg, webp, gif)' : 'Images only (png, jpg, webp, gif)';
+      return NextResponse.json({ error: `Unsupported file type '${blob.type}'. ${accepted}.` }, { status: 400 });
     }
     if (blob.size > MAX_FILE_BYTES) {
       return NextResponse.json({ error: 'File exceeds the 8MB upload limit.' }, { status: 413 });
     }
-
-    // Optional caller-provided sub-folder (defaults to a generic bucket path).
-    const folderRaw = (formData.get('folder') as string) || 'maintenance';
-    const folder = folderRaw.replace(/[^a-z0-9_-]/gi, '') || 'maintenance';
 
     const ext = (blob.name?.split('.').pop() || blob.type.split('/').pop() || 'png').toLowerCase().replace(/[^a-z0-9]/g, '');
     const objectPath = `${folder}/${crypto.randomUUID()}.${ext}`;

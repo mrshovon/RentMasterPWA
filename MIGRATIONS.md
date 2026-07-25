@@ -19,6 +19,16 @@ has now happened twice.
 - Ship the SQL file and the code that needs it together, then run the SQL **before** relying on it.
 - The Supabase SQL editor runs a script as a single transaction — a failure part-way rolls back the
   *whole* file. Do not assume a script that errored applied "the earlier bits".
+- **Base-schema primary keys are not all `uuid`.** They were made by hand, so `properties.id` is
+  `text` and `billing_ledgers.id` is `character varying`, even though the app fills every one of
+  them with a `crypto.randomUUID()` string. A new child table that declares its FK column `uuid`
+  fails with `42804: Key columns ... are of incompatible types`. Declare referencing columns `text`
+  unless you have checked the parent, and `::text` any id you select in a backfill. Tables created
+  by these migration files (`staff`, `accounts`, …) *are* real `uuid`.
+- Prefer a self-contained script over an ordering dependency: re-stating another migration's
+  `add column if not exists` costs nothing and removes a whole class of "ran them in the wrong
+  order" failures. Guard anything touching an optional module's table with
+  `if to_regclass('public.x') is not null`.
 
 ## Applied
 
@@ -35,4 +45,6 @@ has now happened twice.
 | `ADD_PAYMENT_SUBMISSIONS.sql` | ⏳ NOT YET APPLIED | Creates `payment_submissions` (owner manual bKash payments awaiting admin approval, `pending → approved/rejected`). On approval a `subscription_history` row activates the plan; a pending row writes none. Without it the owner payment POST and admin Payments queue 404/500. |
 | `ADD_APP_SETTINGS.sql` | ⏳ NOT YET APPLIED | Creates `app_settings` (key/value singleton for `payment_config` + `default_signup_tier`). Without it the Payment Setup menu, the owner payment screen's QR, and the default-signup-tier setting have nowhere to read/write. (QR image reuses the existing public `RentMasterProDocs` bucket via `/api/admin/uploads` — no new bucket.) |
 | `ADD_REMINDERS.sql` | ⏳ NOT YET APPLIED | Creates `reminders` (owner-scheduled rent reminders to tenants, `pending → sent/canceled`, once/monthly). Without it the owner Reminders tab POST/GET and the `/api/cron/reminders` tick 404/500. Also needs `CRON_SECRET` env + `vercel.json` cron for scheduled (future/monthly) delivery. |
-| `ADD_BILLING_PAID_AT.sql` | ⏳ NOT YET APPLIED | Adds `billing_ledgers.paid_at timestamptz` — the date the owner says the rent was actually received (they pick it when marking an invoice paid, and can correct it afterwards). Referenced by the code since receipts landed, but never had a migration file. Without it the PATCH logs `paid_at not updated`, every receipt prints today's date, and a back-dated invoice is stamped LATE even when the tenant paid on time. |
+| `ADD_BILLING_PAID_AT.sql` | ⏳ NOT YET APPLIED (also applied as part of `ADD_BILLING_PAYMENTS.sql`) | Adds `billing_ledgers.paid_at timestamptz` — the date the owner says the rent was actually received (they pick it when marking an invoice paid, and can correct it afterwards). Referenced by the code since receipts landed, but never had a migration file. Without it the PATCH logs `paid_at not updated`, every receipt prints today's date, and a back-dated invoice is stamped LATE even when the tenant paid on time. |
+| `ADD_BILLING_PAYMENTS.sql` | ⏳ NOT YET APPLIED (self-contained — safe to run in either order relative to `ADD_BILLING_PAID_AT.sql`, whose column it re-adds idempotently) | Creates `billing_payments` (installment log per invoice) + `billing_ledgers.amount_paid`, allows `payment_status = 'partial'`, backfills a payment row for every already-paid invoice, and re-points `account_transactions.source_ref` from the ledger id to the payment id. Without it every partial-payment route 404/500s, the owner's Collected/Outstanding figures are wrong, and marking a bill paid fails on the missing column. ⚠️ Section 3 drops any hand-made CHECK on `payment_status` — the table has no DDL in this repo, so an unknown constraint there would otherwise reject `'partial'` at runtime only. |
+| `ADD_TENANT_NID_AND_RECEIPT_NAME.sql` | ⏳ NOT YET APPLIED | Adds `tenants.nid_encrypted` (the NID is now AES-256-GCM encrypted instead of one-way hashed, so an owner can read it back and correct it — `nid_hash` becomes legacy and unrecoverable) and `properties.receipt_name` (per-property name printed on receipts; null = the owner's account name). Without it, onboarding or editing a tenant with an NID 500s on the missing column, and saving a property's receipt name fails. **Also needs the `NID_ENCRYPTION_KEY` env var** (32 bytes, base64 or hex) on the server, or saving an NID is refused with a message naming it. |

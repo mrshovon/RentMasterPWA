@@ -20,7 +20,7 @@ export async function GET(request: NextRequest) {
       .select(`
         id, name, phone, family_members, monthly_rent, due_date, rented_date, service_charge, advance_amount, property_id,
         allow_login_unassigned,
-        properties:property_id ( id, name, address, flat_no, is_vacant, owner_id, owner_phone )
+        properties:property_id ( id, name, address, flat_no, is_vacant, owner_id, owner_phone, receipt_name )
       `)
       .eq('id', tenantId)
       .single();
@@ -80,6 +80,8 @@ export async function GET(request: NextRequest) {
           flat_no: propertyNode.flat_no,
           is_vacant: propertyNode.is_vacant,
           owner_phone: propertyNode.owner_phone,
+          // The name to print on this property's receipts; null falls back to the owner's name.
+          receipt_name: propertyNode.receipt_name ?? null,
         }
       : null;
 
