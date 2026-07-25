@@ -20,6 +20,15 @@ alter table public.tenants
 -- NIDs of tenants onboarded before this change cannot be recovered from it — those tenants show
 -- an empty NID field until the owner re-enters the number. Dropping the column is safe whenever
 -- you want to, but is deliberately not done here.
+--
+-- It must however be NULLABLE. The app no longer writes the column at all, so if it was created
+-- NOT NULL every onboarding now fails with
+--     null value in column "nid_hash" of relation "tenants" violates not-null constraint
+-- — a constraint that was never tested before, because the old code always supplied the column
+-- (writing the hash, or an explicit null when no NID was given). Safe either way: a no-op when
+-- the column is already nullable.
+alter table public.tenants
+  alter column nid_hash drop not null;
 
 -- =====================================================================================
 -- 2. properties.receipt_name — the name printed on that property's receipts

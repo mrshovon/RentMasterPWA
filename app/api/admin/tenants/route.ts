@@ -127,12 +127,29 @@ export async function POST(request: NextRequest) {
           advance_amount:advanceAmount || 0.00
         }
       ])
-      .select()
+      // Same embed as the list GET, so a freshly created tenant is shape-identical to a listed one.
+      .select(`
+        *,
+        properties:property_id (
+          id,
+          name,
+          owner_id
+        )
+      `)
       .single();
 
     if (tenantInsertError) {
       console.error('Supabase Tenant Write Error:', tenantInsertError);
-      return NextResponse.json({ error: tenantInsertError.message }, { status: 500 });
+      // A schema error must not reach the owner as a bare database sentence — the not-null
+      // failure on the legacy nid_hash column reads as "null value in column …", which is
+      // meaningless to them. Name the migration instead, keeping the original for diagnosis.
+      const raw = tenantInsertError.message || '';
+      const isNidSchemaIssue = /nid_hash|nid_encrypted/i.test(raw);
+      return NextResponse.json({
+        error: isNidSchemaIssue
+          ? `The tenants table is out of date — run ADD_TENANT_NID_AND_RECEIPT_NAME.sql in Supabase. (${raw})`
+          : raw || 'Could not save the tenant.',
+      }, { status: 500 });
     }
 
     // 3. Side-Effect Automation Layer: Toggle unit state 'is_vacant' to false inside public.properties
@@ -145,11 +162,13 @@ export async function POST(request: NextRequest) {
     if (propertyUpdateError) {
       console.error('Automation side effect update warning error:', propertyUpdateError);
       // We still return success since tenant record exists but notify pipeline warnings
-      return NextResponse.json({ success: true, data: tenantRecord, passcode: rawPasscode, warning: 'Tenant linked, but property state toggle exception.' }, { status: 201 });
+      return NextResponse.json({ success: true, data: shapeTenantForOwner(tenantRecord), passcode: rawPasscode, warning: 'Tenant linked, but property state toggle exception.' }, { status: 201 });
     }
 
     // `passcode` is the one-time plaintext for the owner to share; it is not stored.
-    return NextResponse.json({ success: true, data: tenantRecord, passcode: rawPasscode }, { status: 201 });
+    // Shaped like the GET and the PATCH: without the decrypted `nid`, the client's copy of this
+    // tenant has no NID, and the owner's next edit would send an empty field and erase it.
+    return NextResponse.json({ success: true, data: shapeTenantForOwner(tenantRecord), passcode: rawPasscode }, { status: 201 });
 
   } catch (runtimeExceptionCatch: any) {
     console.error('Fatal Pipeline Execution Tenant Core Route Crash:', runtimeExceptionCatch);
