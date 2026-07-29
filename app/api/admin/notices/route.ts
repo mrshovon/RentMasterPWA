@@ -150,12 +150,22 @@ export async function GET(request: NextRequest) {
     let clauses: string[] = [];
     let dynamicTraceLogContext = "";
 
-    const runQuery = (filter: string[]) =>
-      supabaseAdminEngine
+    // When this account was created. Notices predating it are somebody else's history — a tenant
+    // who moved in this month has no business reading last year's building announcements.
+    // Resolved per role below; null means "couldn't tell", and we deliberately FAIL OPEN (serve
+    // the unfiltered feed). Note this is the opposite of the audience filter's fail-closed rule
+    // further down: an unresolved owner there would leak another building's notices, whereas an
+    // unresolved join date only risks showing older ones of the reader's OWN feed.
+    let joinedAt: string | null = null;
+
+    const runQuery = (filter: string[]) => {
+      let query = supabaseAdminEngine
         .from('notices')
         .select('*')
-        .or(filter.join(','))
-        .order('created_at', { ascending: false });
+        .or(filter.join(','));
+      if (joinedAt) query = query.gte('created_at', joinedAt);
+      return query.order('created_at', { ascending: false });
+    };
 
     // 🎯 CONDITIONAL SECURITY FILTER ROUTER SWITCH
     if (tenantId) {
@@ -167,8 +177,10 @@ export async function GET(request: NextRequest) {
       // Previously this matched every 'all_tenants' row regardless of sender, so one owner's
       // announcement was readable by every other owner's tenants.
       const { data: tenantRow } = await supabaseAdminEngine
-        .from('tenants').select('owner_id').eq('id', tenantId).maybeSingle();
+        .from('tenants').select('owner_id, created_at').eq('id', tenantId).maybeSingle();
       const theirOwnerId = tenantRow?.owner_id ?? null;
+      // Onboarding date rides along on the row we already had to fetch — no extra round-trip.
+      joinedAt = tenantRow?.created_at ?? null;
 
       clauses = [
         'and(target_scope.eq.everyone,sender_type.eq.system_admin)',
@@ -185,6 +197,18 @@ export async function GET(request: NextRequest) {
       // 🏢 OWNER SESSION ACTIVE: notices issued BY them, plus admin bulletins addressed to all
       // owners, to everyone, or to this owner specifically.
       console.log(`[NOTICE GATEWAY] Fetching portfolio notices dashboard feed for owner runtime profile: ${ownerId}`);
+
+      // Owners are Supabase auth users; auth.users.created_at is the only trustworthy signup
+      // date (user_profiles is a best-effort mirror that never writes one — see
+      // app/api/auth/signup/route.ts). Only trims admin bulletins in practice: an owner's own
+      // notices postdate their signup by definition.
+      try {
+        const { data: authOwner } = await supabaseAdminEngine.auth.admin.getUserById(ownerId);
+        joinedAt = authOwner?.user?.created_at ?? null;
+      } catch (joinDateErr) {
+        console.error('[notices] could not resolve owner signup date; serving the full feed:', joinDateErr);
+      }
+
       clauses = [
         `sender_id.eq.${ownerId}`,
         'target_scope.eq.all_owners',
