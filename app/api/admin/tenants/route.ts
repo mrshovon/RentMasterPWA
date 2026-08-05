@@ -5,6 +5,7 @@ import { resolveOwnerSubscription, assertOwnerCanWrite, checkCreateLimit, assert
 import { generatePasscode, hashPasscode } from '../../../../lib/passcode';
 import { encryptField, hasEncryptionKey } from '../../../../lib/field-crypto';
 import { shapeTenantForOwner } from '../../../../lib/tenants';
+import { validatePhone } from '../../../../lib/validate';
 import crypto from 'crypto';
 
 
@@ -72,6 +73,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Validation missing compulsory database column parameters.' }, { status: 400 });
     }
 
+    // The phone IS the tenant's login identity, so it is stored canonically. Everything the
+    // tenant later types is matched against this via phoneLookupCandidates in the login route.
+    const parsedPhone = validatePhone(phone, { required: true });
+    if (!parsedPhone.ok) {
+      return NextResponse.json({ error: parsedPhone.error }, { status: 400 });
+    }
+
     // Subscription gate: block if the owner's plan is locked, then enforce the tier limit.
     const guard = await assertOwnerCanWrite(role, ownerId);
     if (!guard.ok) return NextResponse.json(guard.body, { status: guard.status });
@@ -116,7 +124,7 @@ export async function POST(request: NextRequest) {
           property_id: propertyId,
           owner_id: ownerId,
           name: name,
-          phone: phone,
+          phone: parsedPhone.value,
           family_members: familyMembers || 1,
           nid_encrypted: nidEncrypted,
           password_hash: dummyPasswordHash || null,

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { supabaseClient, supabaseAdminEngine } from '@/lib/supabase-server';
 import { signTenantToken } from '@/lib/tenant-jwt';
 import { isTenantLoginBlocked, TENANT_BLOCKED_MESSAGE } from '@/lib/tenant-access';
+import { normalizePhone, phoneLookupCandidates } from '@/lib/validate';
 import crypto from 'crypto';
 
 // =====================================================================================
@@ -95,15 +96,26 @@ export async function POST(request: Request) {
       if (!phone || !passcode) {
         return NextResponse.json({ success: false, error: 'Phone and passcode are required.' }, { status: 400, headers: cors });
       }
-      const key = attemptKey('tenant', phone);
+      // Throttle on the canonical number so 01712345678 and +8801712345678 can't be used as
+      // two separate budgets against the same account.
+      const key = attemptKey('tenant', normalizePhone(phone));
       if (isLockedOut(key)) return lockedResponse();
 
-      const { data: tenant, error } = await supabaseAdminEngine
+      // Rows predate phone validation and hold whatever the owner typed at the time, while the
+      // tenant may type any of the spellings of their own number. Match against every form the
+      // row could be under rather than migrating the column — a migration that missed a row
+      // would lock that tenant out permanently, and they have no self-service recovery.
+      //
+      // `limit(1)` rather than maybeSingle(): tenants.phone has no unique constraint, and
+      // maybeSingle() ERRORS on a duplicate, which would turn two tenants sharing a number into
+      // a 500 that locks out both instead of just the second.
+      const { data: matches, error } = await supabaseAdminEngine
         .from('tenants')
         .select('id, name, phone, password_hash, property_id, allow_login_unassigned')
-        .eq('phone', String(phone).trim())
-        .maybeSingle();
+        .in('phone', phoneLookupCandidates(phone))
+        .limit(1);
       if (error) throw error;
+      const tenant = matches?.[0] ?? null;
 
       const hash = crypto.createHash('sha256').update(String(passcode).trim()).digest('hex');
       // Uniform error for "no such tenant" and "wrong passcode" (no account enumeration).

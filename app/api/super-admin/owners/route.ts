@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
+import { validateEmail, validatePhone } from '@/lib/validate';
 
 // =====================================================================================
 // 🛡️ ADMIN — OWNERS DIRECTORY
@@ -46,17 +47,30 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    if (!body.email || !body.pass) {
-      return NextResponse.json({ success: false, error: 'email and pass are required.' }, { status: 400 });
+
+    // This route used to accept any non-empty email and ANY password — no format check, no
+    // length floor — so accounts provisioned by an admin were the weakest in the system, weaker
+    // than what the public signup form allows. Same rules as /api/auth/signup now.
+    const parsedEmail = validateEmail(body.email, { required: true });
+    if (!parsedEmail.ok) {
+      return NextResponse.json({ success: false, error: parsedEmail.error }, { status: 400 });
+    }
+    const parsedPhone = validatePhone(body.phone);
+    if (!parsedPhone.ok) {
+      return NextResponse.json({ success: false, error: parsedPhone.error }, { status: 400 });
+    }
+    const password = String(body.pass || '');
+    if (password.length < 8) {
+      return NextResponse.json({ success: false, error: 'Password must be at least 8 characters.' }, { status: 400 });
     }
 
     const { data: authUser, error: authError } = await supabaseAdminEngine.auth.admin.createUser({
-      email: body.email,
-      password: body.pass,
+      email: parsedEmail.value,
+      password,
       email_confirm: true,
       user_metadata: {
         name: body.name,
-        phone: body.phone,
+        phone: parsedPhone.value,
         role: body.role || 'owner',
       },
     });
@@ -67,7 +81,7 @@ export async function POST(request: Request) {
     await supabaseAdminEngine.from('user_profiles').upsert({
       id: authUser.user.id,
       name: body.name || 'Owner',
-      phone: body.phone || '',
+      phone: parsedPhone.value,
       role: body.role || 'owner',
     }, { onConflict: 'id' });
 

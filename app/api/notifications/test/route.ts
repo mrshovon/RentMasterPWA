@@ -22,7 +22,7 @@ export async function POST(request: NextRequest) {
     }
 
     const report = await sendPushReport([userId], {
-      title: 'RentMaster test notification',
+      title: 'Bari360 test notification',
       body: 'If you can see this, notifications are working on this device.',
       url: '/',
       tag: 'push-self-test',

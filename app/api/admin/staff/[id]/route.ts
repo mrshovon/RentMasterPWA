@@ -68,7 +68,12 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     if (!(await ownsStaff(id, uid))) return notFound();
 
     const body = await request.json();
-    const fields = staffFieldsFrom(body);
+    let fields: Record<string, unknown>;
+    try {
+      fields = staffFieldsFrom(body);
+    } catch (e: any) {
+      return NextResponse.json({ success: false, error: e.message }, { status: 400 });
+    }
     if ('name' in fields && !fields.name) {
       return NextResponse.json({ success: false, error: 'A name is required.' }, { status: 400 });
     }

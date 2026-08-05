@@ -5,6 +5,7 @@ import { assertOwnerCanWrite, resolveOwnerSubscription, assertItemEnabled } from
 import { generatePasscode, hashPasscode } from '../../../../../lib/passcode';
 import { encryptField, hasEncryptionKey } from '../../../../../lib/field-crypto';
 import { shapeTenantForOwner } from '../../../../../lib/tenants';
+import { validatePhone } from '../../../../../lib/validate';
 
 // ==============================================================================
 // 🚀 TENANT MUTATOR: edit tenant details / revise rent. A rent change is journaled
@@ -69,7 +70,13 @@ export async function PATCH(
     // 2. Assemble the update set from provided fields only.
     const updates: Record<string, any> = {};
     if (name !== undefined) updates.name = name;
-    if (phone !== undefined) updates.phone = phone;
+    // Changing this changes what the tenant signs in with, so it is validated and stored
+    // canonically rather than passed straight through as it used to be.
+    if (phone !== undefined) {
+      const parsedPhone = validatePhone(phone, { required: true });
+      if (!parsedPhone.ok) return NextResponse.json({ error: parsedPhone.error }, { status: 400 });
+      updates.phone = parsedPhone.value;
+    }
     if (monthlyRent !== undefined) updates.monthly_rent = parseFloat(monthlyRent);
     if (serviceCharge !== undefined) updates.service_charge = parseFloat(serviceCharge);
     if (advanceAmount !== undefined) updates.advance_amount = parseFloat(advanceAmount);

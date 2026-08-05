@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { sendPushToRole } from '@/lib/push-send';
 import { DEFAULT_PROVIDER_ID } from '@/lib/payments/registry';
+import { validatePhone } from '@/lib/validate';
 import crypto from 'crypto';
 
 // =====================================================================================
@@ -55,7 +56,10 @@ export async function POST(request: NextRequest) {
 
     if (!tierId) return NextResponse.json({ success: false, error: 'A plan is required.' }, { status: 400 });
     if (!txnId?.trim()) return NextResponse.json({ success: false, error: 'The bKash transaction id is required.' }, { status: 400 });
-    if (!senderMsisdn?.trim()) return NextResponse.json({ success: false, error: 'The mobile number you paid from is required.' }, { status: 400 });
+    // The admin reconciles this submission against the bKash statement by number, so a
+    // malformed one produces a payment that can never be matched to a plan.
+    const parsedMsisdn = validatePhone(senderMsisdn, { required: true });
+    if (!parsedMsisdn.ok) return NextResponse.json({ success: false, error: parsedMsisdn.error }, { status: 400 });
 
     // Validate the tier: must exist, be active, be a paid non-custom tier.
     const { data: tier, error: tierErr } = await supabaseAdminEngine
@@ -108,7 +112,7 @@ export async function POST(request: NextRequest) {
           provider: DEFAULT_PROVIDER_ID,
           tier_id: tier.id,
           amount: amount != null && amount !== '' ? Number(amount) : Number(tier.price || 0),
-          sender_msisdn: String(senderMsisdn).trim(),
+          sender_msisdn: parsedMsisdn.value,
           txn_id: String(txnId).trim(),
           status: 'pending',
         },

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { supabaseClient, supabaseAdminEngine } from '@/lib/supabase-server';
 import { getDefaultSignupTier } from '@/lib/app-settings';
 import { activateSubscription } from '@/lib/payments/activate';
+import { validateEmail, validatePhone } from '@/lib/validate';
 
 // =====================================================================================
 // 🔐 OWNER SELF-SIGNUP — public route (not behind middleware auth, like login/forgot).
@@ -47,13 +48,22 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
     const name = String(body.name || '').trim();
-    const email = String(body.email || '').trim();
-    const phone = String(body.phone || '').trim();
     const password = String(body.password || '');
 
-    if (!email || !email.includes('@')) {
-      return NextResponse.json({ success: false, error: 'A valid email is required.' }, { status: 400, headers: cors });
+    const parsedEmail = validateEmail(body.email, { required: true });
+    if (!parsedEmail.ok) {
+      return NextResponse.json({ success: false, error: parsedEmail.error }, { status: 400, headers: cors });
     }
+    const email = parsedEmail.value;
+
+    // Optional, but a supplied number must be usable — this is a public route, so it is the
+    // only thing standing between a typo (or a bot) and a permanent row.
+    const parsedPhone = validatePhone(body.phone);
+    if (!parsedPhone.ok) {
+      return NextResponse.json({ success: false, error: parsedPhone.error }, { status: 400, headers: cors });
+    }
+    const phone = parsedPhone.value;
+
     if (password.length < 8) {
       return NextResponse.json({ success: false, error: 'Password must be at least 8 characters.' }, { status: 400, headers: cors });
     }
@@ -61,7 +71,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error: 'Your name is required.' }, { status: 400, headers: cors });
     }
 
-    const key = email.toLowerCase();
+    const key = email;
     if (isThrottled(key)) {
       return NextResponse.json({ success: false, error: 'Too many attempts. Please wait a few minutes and try again.' }, { status: 429, headers: cors });
     }

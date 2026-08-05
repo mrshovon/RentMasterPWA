@@ -51,7 +51,12 @@ export async function POST(request: NextRequest) {
     if (!gate.ok) return NextResponse.json(gate.body, { status: gate.status });
 
     const body = await request.json();
-    const fields = staffFieldsFrom(body);
+    let fields: Record<string, unknown>;
+    try {
+      fields = staffFieldsFrom(body);
+    } catch (e: any) {
+      return NextResponse.json({ success: false, error: e.message }, { status: 400 });
+    }
     if (!fields.name) {
       return NextResponse.json({ success: false, error: 'A name is required.' }, { status: 400 });
     }

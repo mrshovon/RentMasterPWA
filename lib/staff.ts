@@ -1,5 +1,6 @@
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from './supabase-server';
+import { validatePhone } from './validate';
 
 // =====================================================================================
 // 👷 STAFF — shared helpers for the /api/admin/staff routes.
@@ -22,8 +23,17 @@ export const PAYMENT_METHODS = ['cash', 'bkash', 'nagad', 'bank', 'other'] as co
 export type PaymentMethod = (typeof PAYMENT_METHODS)[number];
 
 /**
+ * Thrown by staffFieldsFrom for a malformed field. The staff routes catch it and turn it into a
+ * 400 — throwing keeps the "only present keys" shape of the return value intact, which an
+ * {ok, error} wrapper would have forced every caller to unpack.
+ */
+export class StaffFieldError extends Error {}
+
+/**
  * Normalise the editable fields off a request body. Used by POST and PATCH so the two can
  * never drift. Only keys actually present are returned, so PATCH stays a partial update.
+ *
+ * @throws StaffFieldError when a supplied value is invalid.
  */
 export function staffFieldsFrom(body: any): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -32,7 +42,13 @@ export function staffFieldsFrom(body: any): Record<string, unknown> {
     return s === '' ? null : s;
   };
   if (body.name !== undefined) out.name = text(body.name);
-  if (body.phone !== undefined) out.phone = text(body.phone);
+  if (body.phone !== undefined) {
+    // Optional field, but the owner rings this number — an unusable one is a dead contact
+    // sitting in the staff list looking like a working one.
+    const parsed = validatePhone(body.phone);
+    if (!parsed.ok) throw new StaffFieldError(parsed.error);
+    out.phone = parsed.value || null;
+  }
   if (body.designation !== undefined) out.designation = text(body.designation);
   if (body.monthlySalary !== undefined) out.monthly_salary = Number(body.monthlySalary) || 0;
   if (body.joiningDate !== undefined) out.joining_date = text(body.joiningDate);

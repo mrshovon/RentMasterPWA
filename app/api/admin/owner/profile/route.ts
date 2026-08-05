@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
+import { validatePhone } from '@/lib/validate';
 
 // =====================================================================================
 // 👤 ACCOUNT PROFILE — owner AND super-admin self-service (both are Supabase auth users).
@@ -69,9 +70,18 @@ export async function PATCH(request: NextRequest) {
     }
 
     const name = hasName ? String(body.name).trim().slice(0, MAX_NAME_LEN) : undefined;
-    const phone = hasPhone ? String(body.phone).trim().slice(0, MAX_PHONE_LEN) : undefined;
     if (hasName && !name) {
       return NextResponse.json({ error: 'Name cannot be empty.' }, { status: 400 });
+    }
+
+    // Was a bare trim-and-truncate, which let anything through. This number is printed on rent
+    // receipts and is how tenants contact the owner. Empty is allowed (the field is optional);
+    // malformed is not.
+    let phone: string | undefined;
+    if (hasPhone) {
+      const parsed = validatePhone(body.phone);
+      if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
+      phone = parsed.value.slice(0, MAX_PHONE_LEN);
     }
 
     // Read-modify-write so the keys this route knows nothing about survive: role (which is what

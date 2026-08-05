@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { sendPushToRole } from '@/lib/push-send';
+import { validateEmail, validatePhone } from '@/lib/validate';
 import crypto from 'crypto';
 
 // =====================================================================================
@@ -35,6 +36,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'A message is required.' }, { status: 400 });
     }
 
+    // Both optional, but these are the only way the team can reply — an unreachable contact
+    // detail is worse than none, because it looks like a way to follow up and isn't.
+    const parsedEmail = validateEmail(email);
+    if (!parsedEmail.ok) return NextResponse.json({ error: parsedEmail.error }, { status: 400 });
+    const parsedPhone = validatePhone(phone);
+    if (!parsedPhone.ok) return NextResponse.json({ error: parsedPhone.error }, { status: 400 });
+
     const messageId = crypto.randomUUID(); // no DB default on id — generate it here
 
     const { data: row, error: insertError } = await supabaseAdminEngine
@@ -44,8 +52,8 @@ export async function POST(request: NextRequest) {
           id: messageId,
           owner_id: ownerId,
           name: name?.trim() || null,
-          email: email?.trim() || null,
-          phone: phone?.trim() || null,
+          email: parsedEmail.value || null,
+          phone: parsedPhone.value || null,
           tier_id: tierId || null,
           message: String(message).trim().slice(0, MAX_MESSAGE_LEN),
           status: 'new',

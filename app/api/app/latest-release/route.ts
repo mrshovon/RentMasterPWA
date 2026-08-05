@@ -28,7 +28,7 @@ export async function GET() {
     const res = await fetch(UPSTREAM, {
       headers: {
         Accept: 'application/vnd.github+json',
-        'User-Agent': 'RentMaster-Update-Check',
+        'User-Agent': 'Bari360-Update-Check',
       },
       next: { revalidate: REVALIDATE_SECONDS },
     });

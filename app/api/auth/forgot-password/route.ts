@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseClient } from '@/lib/supabase-server';
+import { validateEmail } from '@/lib/validate';
 
 // =====================================================================================
 // 🔐 FORGOT PASSWORD — owner self-service, step 1 (public route, not behind middleware auth)
@@ -39,13 +40,27 @@ function record(key: string) {
   else rec.count += 1;
 }
 
-// Where the recovery link should send the owner. Prefer the calling frontend's Origin when it
-// is on the allow-list, else the first ALLOWED_ORIGINS entry, else localhost dev.
+// Where the recovery link should send the owner.
+//
+// PUBLIC_APP_URL comes first and is the one to set in production. This used to resolve off
+// ALLOWED_ORIGINS alone, which made the reset link depend on the ORDERING of the CORS list —
+// and, when that variable was unset (as it was), silently produced
+// "http://localhost:3001/reset-password" in every production email. The mail arrived, the link
+// went nowhere, and nothing anywhere logged a problem.
+//
+// The Origin fallback still exists so a preview deployment resets against itself, but it is
+// only trusted when the origin is on the allow-list — an attacker who could steer this would be
+// having recovery links for other people's accounts mailed to a host of their choosing.
+//
+// ⚠️ Whatever this resolves to must ALSO be listed under Supabase → Authentication → URL
+// Configuration → Redirect URLs. Supabase silently ignores a redirectTo that isn't on that list
+// and substitutes the Site URL, which looks identical from here.
 function resolveResetUrl(request: NextRequest): string {
   const allowed = (process.env.ALLOWED_ORIGINS || '')
     .split(',').map((s) => s.trim()).filter(Boolean);
   const origin = request.headers.get('origin');
   const base =
+    process.env.PUBLIC_APP_URL ||
     (origin && allowed.includes(origin) && origin) ||
     allowed[0] ||
     'http://localhost:3001';
@@ -66,17 +81,23 @@ export async function OPTIONS() {
 export async function POST(request: NextRequest) {
   try {
     const { email } = await request.json();
-    if (!email || typeof email !== 'string' || !email.includes('@')) {
-      return NextResponse.json({ success: false, error: 'A valid email is required.' }, { status: 400, headers: cors });
+    const parsed = validateEmail(email, { required: true });
+    if (!parsed.ok) {
+      return NextResponse.json({ success: false, error: parsed.error }, { status: 400, headers: cors });
     }
 
-    const key = String(email).trim().toLowerCase();
+    const key = parsed.value; // validateEmail already trims and lowercases
     if (isThrottled(key)) return ack(); // stay generic even when throttled — no signal to the caller
     record(key);
 
+    const redirectTo = resolveResetUrl(request);
+    // Logged because a wrong value here is invisible from every other vantage point: the user
+    // gets a real email containing a dead link, and this endpoint returns its usual 200.
+    console.log('[forgot-password] recovery link will point at', redirectTo);
+
     // Fire the recovery email. We deliberately ignore the result: a non-existent email must
     // look identical to a real one from the outside.
-    await supabaseClient.auth.resetPasswordForEmail(key, { redirectTo: resolveResetUrl(request) });
+    await supabaseClient.auth.resetPasswordForEmail(key, { redirectTo });
 
     return ack();
   } catch (err: any) {
