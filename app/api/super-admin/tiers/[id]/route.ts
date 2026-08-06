@@ -25,6 +25,8 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     if (b.maxTenants !== undefined) updates.max_tenants_allowed = parseInt(b.maxTenants, 10);
     if (b.discountPercent !== undefined) updates.discount_percent = parseFloat(b.discountPercent);
     if (b.isActive !== undefined) updates.is_active = !!b.isActive;
+    // Only touched when sent, so an unrelated PATCH can't silently unlist a plan.
+    if (b.isPublic !== undefined) updates.is_public = !!b.isPublic;
     if (b.action === 'activate') updates.is_active = true;
     if (b.action === 'deactivate') updates.is_active = false;
 

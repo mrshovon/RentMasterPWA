@@ -58,6 +58,8 @@ export async function POST(request: Request) {
       max_properties_allowed: parseInt(b.maxProperties ?? -1, 10),
       max_tenants_allowed: parseInt(b.maxTenants ?? -1, 10),
       is_active: b.isActive === undefined ? true : !!b.isActive,
+      // Listed to owners by default. False = hidden: admin-assign only. See ADD_PLAN_VISIBILITY.sql.
+      is_public: b.isPublic === undefined ? true : !!b.isPublic,
       discount_percent: b.discountPercent !== undefined ? parseFloat(b.discountPercent) : 0,
       ...addonColumns(addons.keys),
     };

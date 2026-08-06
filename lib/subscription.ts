@@ -37,6 +37,27 @@ export interface OwnerSubscription {
 // states an explicit tenure (a 7-day free trial, say) is time-limited by definition, so it
 // must run the normal expiry/grace/lock lifecycle rather than being treated as perpetual —
 // otherwise a zero-price trial would never end.
+/**
+ * May this owner see and choose this plan?
+ *
+ * The single source of truth for plan visibility — the owner plan list, self-activation and the
+ * payment route all defer to it, because three copies of this rule would drift.
+ *
+ * A hidden plan (`is_public = false`, see ADD_PLAN_VISIBILITY.sql) is invisible and unusable to
+ * owners, with one exception: the owner already ON it. Without that exception a bespoke plan
+ * would be unrenewable — the owner could not see it to pay again, and would drift into grace and
+ * then lock at expiry with no way out except the admin re-assigning it by hand.
+ *
+ * Note `is_public !== false`, not `=== true`: before the migration runs the field is undefined,
+ * and every plan must keep behaving exactly as it does today.
+ */
+export function tierVisibleToOwner(tier: any, currentTierId?: string | null): boolean {
+  if (!tier) return false;
+  if (tier.is_active === false) return false;   // retired: nobody, ever
+  if (tier.is_public !== false) return true;    // listed (or pre-migration)
+  return !!currentTierId && tier.id === currentTierId;
+}
+
 function tierIsFree(tier: any): boolean {
   if (!tier) return true;
   if (Number(tier.duration_days || 0) > 0 || tier.billing_interval === 'days') return false;
@@ -44,21 +65,26 @@ function tierIsFree(tier: any): boolean {
 }
 
 async function loadFreeLimits(): Promise<{ maxProperties: number; maxTenants: number }> {
+  // `select('*')` and filter in JS rather than naming columns: referencing `is_public` in the
+  // column list would 42703 on any database where ADD_PLAN_VISIBILITY.sql has not been run, and
+  // this query decides the limits for EVERY planless owner.
   const { data } = await supabaseAdminEngine
     .from('subscription_tiers')
-    .select('max_properties_allowed, max_tenants_allowed, price')
+    .select('*')
     .lte('price', 0)
     // Exclude enterprise/contact tiers (e.g. Whole Building) and time-limited free trials —
     // neither is the perpetual baseline a planless owner should fall back to.
     .not('billing_interval', 'in', '("custom","days")')
     .order('price', { ascending: true })
-    .order('max_properties_allowed', { ascending: true }) // prefer the most restrictive baseline
-    .limit(1)
-    .maybeSingle();
-  if (!data) return { ...FREE_FALLBACK };
+    .order('max_properties_allowed', { ascending: true }); // prefer the most restrictive baseline
+
+  // A hidden plan must never become the baseline: it would hand its limits to every owner who
+  // has no plan at all, which is the opposite of "only the people I assign it to".
+  const baseline = (data || []).find((t: any) => t.is_active !== false && t.is_public !== false);
+  if (!baseline) return { ...FREE_FALLBACK };
   return {
-    maxProperties: data.max_properties_allowed ?? FREE_FALLBACK.maxProperties,
-    maxTenants: data.max_tenants_allowed ?? FREE_FALLBACK.maxTenants,
+    maxProperties: baseline.max_properties_allowed ?? FREE_FALLBACK.maxProperties,
+    maxTenants: baseline.max_tenants_allowed ?? FREE_FALLBACK.maxTenants,
   };
 }
 

@@ -4,6 +4,7 @@ import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { sendPushToRole } from '@/lib/push-send';
 import { DEFAULT_PROVIDER_ID } from '@/lib/payments/registry';
 import { validatePhone } from '@/lib/validate';
+import { resolveOwnerSubscription, tierVisibleToOwner } from '@/lib/subscription';
 import crypto from 'crypto';
 
 // =====================================================================================
@@ -69,6 +70,13 @@ export async function POST(request: NextRequest) {
       .maybeSingle();
     if (tierErr) throw tierErr;
     if (!tier || tier.is_active === false) {
+      return NextResponse.json({ success: false, error: 'That plan is not available.' }, { status: 400 });
+    }
+    // Hidden plans are admin-assigned only, so a leaked tier id must not be payable. The owner
+    // already ON the plan is allowed through — that is the renewal path, and without it a
+    // bespoke plan would be impossible to pay for a second time.
+    const currentSub = await resolveOwnerSubscription(uid);
+    if (!tierVisibleToOwner(tier, currentSub.tierId)) {
       return NextResponse.json({ success: false, error: 'That plan is not available.' }, { status: 400 });
     }
     if (tier.billing_interval === 'custom') {

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
-import { resolveOwnerSubscription, getDisabledItemIds, countOwnerUsage } from '@/lib/subscription';
+import { resolveOwnerSubscription, getDisabledItemIds, countOwnerUsage, tierVisibleToOwner } from '@/lib/subscription';
 import { resolveOwnerFeatures } from '@/lib/features';
 import { computeExpiry } from '@/lib/payments/activate';
 
@@ -37,12 +37,17 @@ export async function GET(request: NextRequest) {
     // dashboard doesn't need a second request to decide what to render.
     const features = await resolveOwnerFeatures(uid);
 
-    // Available plans for the upgrade/activate list.
-    const { data: tiers } = await supabaseAdminEngine
+    // Available plans for the upgrade/activate list. Hidden plans are filtered out here, with
+    // one exception applied by tierVisibleToOwner: the owner's OWN plan stays listed even when
+    // hidden, so a bespoke plan can still be seen and renewed instead of lapsing at expiry.
+    // Filtered in JS, not with .eq('is_public', true) — naming that column would 42703 before
+    // ADD_PLAN_VISIBILITY.sql runs and take the whole Plan tab down.
+    const { data: allTiers } = await supabaseAdminEngine
       .from('subscription_tiers')
       .select('*')
       .eq('is_active', true)
       .order('price', { ascending: true });
+    const tiers = (allTiers || []).filter((t) => tierVisibleToOwner(t, sub.tierId));
 
     return NextResponse.json({
       success: true,
@@ -78,6 +83,16 @@ export async function POST(request: NextRequest) {
     if (tierErr) throw tierErr;
     if (!tier) return NextResponse.json({ success: false, error: 'That plan does not exist.' }, { status: 404 });
     if (tier.is_active === false) {
+      return NextResponse.json({ success: false, error: 'That plan is no longer available.' }, { status: 400 });
+    }
+
+    // Hidden plans are admin-assigned only. Checked here and not merely omitted from the list
+    // above, or anyone who learned a tier id could activate one. The owner already on it is
+    // allowed through, so they can still renew.
+    const currentSub = await resolveOwnerSubscription(uid);
+    if (!tierVisibleToOwner(tier, currentSub.tierId)) {
+      // Deliberately the same wording as a retired plan — a hidden plan should be
+      // indistinguishable from one that does not exist.
       return NextResponse.json({ success: false, error: 'That plan is no longer available.' }, { status: 400 });
     }
 
