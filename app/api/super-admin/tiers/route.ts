@@ -60,6 +60,8 @@ export async function POST(request: Request) {
       is_active: b.isActive === undefined ? true : !!b.isActive,
       // Listed to owners by default. False = hidden: admin-assign only. See ADD_PLAN_VISIBILITY.sql.
       is_public: b.isPublic === undefined ? true : !!b.isPublic,
+      // Renewable by default. False = one-time (a trial). See ADD_PLAN_RECURRING.sql.
+      is_recurring: b.isRecurring === undefined ? true : !!b.isRecurring,
       discount_percent: b.discountPercent !== undefined ? parseFloat(b.discountPercent) : 0,
       ...addonColumns(addons.keys),
     };

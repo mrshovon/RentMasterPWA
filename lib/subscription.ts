@@ -58,6 +58,35 @@ export function tierVisibleToOwner(tier: any, currentTierId?: string | null): bo
   return !!currentTierId && tier.id === currentTierId;
 }
 
+/**
+ * A one-time plan (a trial): the owner may take it once, then must choose another.
+ *
+ * `=== false`, not `!== true`: before ADD_PLAN_RECURRING.sql runs the field is undefined and
+ * every plan must stay renewable exactly as before. Same convention as `is_public`.
+ */
+export function tierIsOneTime(tier: any): boolean {
+  return tier?.is_recurring === false;
+}
+
+/**
+ * Every tier this owner has ever been on. "Already used a one-time plan" is just "has a
+ * subscription_history row for it" — no extra bookkeeping table needed.
+ *
+ * Returns an empty set on failure rather than throwing: a lookup blip must not block an owner
+ * from activating a plan they are entitled to.
+ */
+export async function ownerUsedTierIds(ownerId: string): Promise<Set<string>> {
+  const { data, error } = await supabaseAdminEngine
+    .from('subscription_history')
+    .select('tier_id')
+    .eq('owner_id', ownerId);
+  if (error) {
+    console.error('[subscription] used-tier lookup failed:', error.message);
+    return new Set();
+  }
+  return new Set((data || []).map((r: { tier_id: string }) => r.tier_id).filter(Boolean));
+}
+
 function tierIsFree(tier: any): boolean {
   if (!tier) return true;
   if (Number(tier.duration_days || 0) > 0 || tier.billing_interval === 'days') return false;
@@ -159,6 +188,17 @@ export async function resolveOwnerSubscription(ownerId: string): Promise<OwnerSu
   const endRaw = canceled && latest.canceled_at ? latest.canceled_at : latest.expiry_date;
   const end = endRaw ? new Date(endRaw).getTime() : now; // missing expiry => treat as ended now
   const graceEnd = end + GRACE_DAYS * DAY_MS;
+
+  // A finished ONE-TIME plan (a trial) drops the owner to Free rather than into grace and then
+  // lock. A trial is priced 0 but carries an explicit duration_days, which tierIsFree() excludes,
+  // so without this it would run the full paid lifecycle and lock out every trial user who did
+  // not convert — ten days after their trial ended, for a plan they never paid for.
+  //
+  // Resolved here at read time rather than by a cron, so it is correct the moment the trial
+  // lapses. They keep working, capped by the Free limits, which is still real pressure to buy.
+  if (tierIsOneTime(tier) && now >= end) {
+    return freeState(await loadFreeLimits(), permissionsRevoked);
+  }
 
   let status: OwnerSubscription['status'];
   let lockReason: OwnerSubscription['lockReason'] = null;

@@ -4,7 +4,7 @@ import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { sendPushToRole } from '@/lib/push-send';
 import { DEFAULT_PROVIDER_ID } from '@/lib/payments/registry';
 import { validatePhone } from '@/lib/validate';
-import { resolveOwnerSubscription, tierVisibleToOwner } from '@/lib/subscription';
+import { resolveOwnerSubscription, tierVisibleToOwner, tierIsOneTime, ownerUsedTierIds } from '@/lib/subscription';
 import crypto from 'crypto';
 
 // =====================================================================================
@@ -81,6 +81,15 @@ export async function POST(request: NextRequest) {
     }
     if (tier.billing_interval === 'custom') {
       return NextResponse.json({ success: false, error: 'That plan is arranged with our team — please use Contact us.' }, { status: 400 });
+    }
+    // One-time plans can be taken once. Guarded on this path too — otherwise a paid trial could
+    // simply be re-bought through the payment screen.
+    if (tierIsOneTime(tier) && (await ownerUsedTierIds(uid)).has(tier.id)) {
+      return NextResponse.json({
+        success: false,
+        code: 'ONE_TIME_PLAN_USED',
+        error: `${tier.name} is a one-time plan and you have already used it. Please choose another plan.`,
+      }, { status: 400 });
     }
     if (Number(tier.price || 0) <= 0) {
       return NextResponse.json({ success: false, error: 'The free plan does not require a payment.' }, { status: 400 });

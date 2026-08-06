@@ -1,7 +1,10 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
-import { resolveOwnerSubscription, getDisabledItemIds, countOwnerUsage, tierVisibleToOwner } from '@/lib/subscription';
+import {
+  resolveOwnerSubscription, getDisabledItemIds, countOwnerUsage,
+  tierVisibleToOwner, tierIsOneTime, ownerUsedTierIds,
+} from '@/lib/subscription';
 import { resolveOwnerFeatures } from '@/lib/features';
 import { computeExpiry } from '@/lib/payments/activate';
 
@@ -47,7 +50,12 @@ export async function GET(request: NextRequest) {
       .select('*')
       .eq('is_active', true)
       .order('price', { ascending: true });
-    const tiers = (allTiers || []).filter((t) => tierVisibleToOwner(t, sub.tierId));
+    // `oneTimeUsed` is COMPUTED here, not a column: a one-time plan the owner has already had
+    // stays in the list (greyed) rather than vanishing, so the UI can say why it isn't offered.
+    const usedTierIds = await ownerUsedTierIds(uid);
+    const tiers = (allTiers || [])
+      .filter((t) => tierVisibleToOwner(t, sub.tierId))
+      .map((t) => ({ ...t, oneTimeUsed: tierIsOneTime(t) && usedTierIds.has(t.id) }));
 
     return NextResponse.json({
       success: true,
@@ -94,6 +102,16 @@ export async function POST(request: NextRequest) {
       // Deliberately the same wording as a retired plan — a hidden plan should be
       // indistinguishable from one that does not exist.
       return NextResponse.json({ success: false, error: 'That plan is no longer available.' }, { status: 400 });
+    }
+
+    // One-time plans (trials) can be taken once. Enforced here and not just by disabling the
+    // button, or the plan could be re-activated by calling this route directly.
+    if (tierIsOneTime(tier) && (await ownerUsedTierIds(uid)).has(tier.id)) {
+      return NextResponse.json({
+        success: false,
+        code: 'ONE_TIME_PLAN_USED',
+        error: `${tier.name} is a one-time plan and you have already used it. Please choose another plan.`,
+      }, { status: 400 });
     }
 
     // Custom / enterprise ("Contact us") tiers are set up by the team, not self-activated.
