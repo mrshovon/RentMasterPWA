@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { validateEmail, validatePhone } from '@/lib/validate';
+import { getPresenceFor } from '@/lib/presence';
 
 // =====================================================================================
 // 🛡️ ADMIN — OWNERS DIRECTORY
@@ -20,9 +21,15 @@ export async function GET() {
     const latestSub: Record<string, any> = {};
     for (const s of subs || []) if (!latestSub[s.owner_id]) latestSub[s.owner_id] = s;
 
+    // Live presence for the whole directory in one query (see lib/presence.ts). Degrades to
+    // an empty map — every account simply reads as "never seen" — if ADD_PRESENCE.sql has
+    // not been run yet, rather than taking the owners list down.
+    const presence = await getPresenceFor((list?.users || []).map((u) => u.id));
+
     const owners = (list?.users || []).map((u) => {
       const meta = (u.user_metadata as any) || {};
       const banned = !!(u as any).banned_until && new Date((u as any).banned_until).getTime() > Date.now();
+      const seen = presence[u.id];
       return {
         id: u.id,
         email: u.email || null,
@@ -34,6 +41,9 @@ export async function GET() {
         suspended: banned,
         permissions_revoked: !!meta.permissions_revoked,
         subscription: latestSub[u.id] || null,
+        // Presence: heartbeat-derived, so it means "app open now", not "logged in at some point".
+        online: !!seen?.online,
+        last_seen_at: seen?.lastSeenAt || null,
       };
     });
 

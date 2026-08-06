@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { resolveOwnerSubscription, getDisabledItemIds, countOwnerUsage } from '@/lib/subscription';
 import { resolveOwnerFeatures } from '@/lib/features';
+import { computeExpiry } from '@/lib/payments/activate';
 
 // =====================================================================================
 // 🧾 OWNER — MY SUBSCRIPTION
@@ -116,15 +117,9 @@ export async function POST(request: NextRequest) {
     }
 
     const isFree = Number(tier.price || 0) <= 0;
-    // Free = perpetual (far-future sentinel). Paid = now + one billing interval.
-    const expiry = new Date();
-    if (isFree) {
-      expiry.setFullYear(expiry.getFullYear() + 100);
-    } else if (tier.billing_interval === 'year') {
-      expiry.setFullYear(expiry.getFullYear() + 1);
-    } else {
-      expiry.setDate(expiry.getDate() + 30);
-    }
+    // Tenure comes from lib/payments/activate.ts — this used to be a copy of that logic,
+    // including the "price <= 0 => +100 years" branch that produced year-2126 expiries.
+    const expiry = computeExpiry(tier);
 
     const { error: insErr } = await supabaseAdminEngine
       .from('subscription_history')
@@ -134,7 +129,8 @@ export async function POST(request: NextRequest) {
         gateway_subscription_id: 'SELF_ACTIVATED',
         amount_paid: Number(tier.price || 0),
         status: 'active',
-        expiry_date: expiry.toISOString(),
+        // null = perpetual (free).
+        expiry_date: expiry ? expiry.toISOString() : null,
       });
     if (insErr) throw insErr;
 

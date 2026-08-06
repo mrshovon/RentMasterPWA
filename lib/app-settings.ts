@@ -64,3 +64,34 @@ export const getMaintenanceMode = () =>
 
 // The tier id given to newly self-signed-up owners. Empty/absent => implicit free (no history row).
 export const getDefaultSignupTier = () => getSetting<{ tierId: string }>('default_signup_tier', { tierId: '' });
+
+// -------------------------------------------------------------------------------------
+// ANALYTICS — admin-managed Google Analytics / Tag Manager wiring, so the IDs can be
+// changed from the admin panel without a redeploy.
+//
+// IDs ONLY, deliberately. There is no "paste your snippet here" field: an arbitrary script
+// stored here would be injected into every page of the app, which is stored XSS for anyone
+// who ever gets hold of the admin account. Both ids are format-validated before they are
+// saved (see isMeasurementId / isContainerId) and the client only ever interpolates them
+// into a known Google URL.
+// -------------------------------------------------------------------------------------
+export interface AnalyticsConfig {
+  gaMeasurementId: string;   // "G-XXXXXXX"   (GA4)
+  gtmContainerId: string;    // "GTM-XXXXXXX" (Tag Manager)
+  enabledWeb: boolean;       // load it in the browser / installed PWA
+  enabledApp: boolean;       // load it inside the native Android shell
+}
+
+export const DEFAULT_ANALYTICS_CONFIG: AnalyticsConfig = {
+  gaMeasurementId: '',
+  gtmContainerId: '',
+  enabledWeb: false,
+  enabledApp: false,
+};
+
+// Google's own formats. Anchored, so nothing else can be smuggled into the script URL.
+export const isMeasurementId = (v: string) => /^G-[A-Z0-9]{4,20}$/.test(v);
+export const isContainerId = (v: string) => /^GTM-[A-Z0-9]{4,20}$/.test(v);
+
+export const getAnalyticsConfig = () =>
+  getSetting<AnalyticsConfig>('analytics_config', DEFAULT_ANALYTICS_CONFIG);

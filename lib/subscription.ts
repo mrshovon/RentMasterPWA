@@ -33,8 +33,13 @@ export interface OwnerSubscription {
   lockReason: 'expired' | 'revoked' | null;
 }
 
+// "Free" here means the perpetual Free baseline, not merely "costs nothing". A tier that
+// states an explicit tenure (a 7-day free trial, say) is time-limited by definition, so it
+// must run the normal expiry/grace/lock lifecycle rather than being treated as perpetual —
+// otherwise a zero-price trial would never end.
 function tierIsFree(tier: any): boolean {
   if (!tier) return true;
+  if (Number(tier.duration_days || 0) > 0 || tier.billing_interval === 'days') return false;
   return Number(tier.price || 0) <= 0;
 }
 
@@ -43,7 +48,9 @@ async function loadFreeLimits(): Promise<{ maxProperties: number; maxTenants: nu
     .from('subscription_tiers')
     .select('max_properties_allowed, max_tenants_allowed, price')
     .lte('price', 0)
-    .neq('billing_interval', 'custom') // exclude enterprise/contact tiers (e.g. Whole Building)
+    // Exclude enterprise/contact tiers (e.g. Whole Building) and time-limited free trials —
+    // neither is the perpetual baseline a planless owner should fall back to.
+    .not('billing_interval', 'in', '("custom","days")')
     .order('price', { ascending: true })
     .order('max_properties_allowed', { ascending: true }) // prefer the most restrictive baseline
     .limit(1)
@@ -90,7 +97,10 @@ export async function resolveOwnerSubscription(ownerId: string): Promise<OwnerSu
 
   const { data: latest } = await supabaseAdminEngine
     .from('subscription_history')
-    .select('*, subscription_tiers:tier_id ( id, name, price, currency, billing_interval, max_properties_allowed, max_tenants_allowed )')
+    // `( * )` rather than a column list on purpose: naming `duration_days` here would make
+    // this whole query fail with 42703 on any database where ADD_PLAN_TENURE.sql has not
+    // been run yet, and that would take every owner's plan resolution down with it.
+    .select('*, subscription_tiers:tier_id ( * )')
     .eq('owner_id', ownerId)
     .order('created_at', { ascending: false })
     .limit(1)

@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
+import { computeExpiry } from '@/lib/payments/activate';
 
 // =====================================================================================
 // 🛡️ ADMIN — SUBSCRIPTION TIERS + PLAN ASSIGNMENT
@@ -28,8 +29,21 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error: 'ownerId and tierId are required.' }, { status: 400 });
     }
 
-    const expiry = new Date();
-    expiry.setDate(expiry.getDate() + parseInt(body.durationDays || '30', 10));
+    // Tenure follows the assigned tier. `durationDays` is now only an explicit admin
+    // override — it used to be the ONLY input, defaulting to 30, with the tier's billing
+    // interval ignored entirely, so assigning a yearly plan gave the owner 30 days.
+    let expiry: Date | null;
+    if (body.durationDays) {
+      expiry = new Date();
+      expiry.setDate(expiry.getDate() + parseInt(body.durationDays, 10));
+    } else {
+      const { data: tier } = await supabaseAdminEngine
+        .from('subscription_tiers')
+        .select('*') // not a column list: duration_days may predate ADD_PLAN_TENURE.sql (42703)
+        .eq('id', tierId)
+        .maybeSingle();
+      expiry = computeExpiry(tier || {});
+    }
 
     const { data, error } = await supabaseAdminEngine
       .from('subscription_history')
@@ -39,7 +53,7 @@ export async function POST(request: Request) {
         gateway_subscription_id: 'ADMIN_ASSIGNED',
         amount_paid: parseFloat(body.amountPaid || '0'),
         status: 'active',
-        expiry_date: expiry.toISOString(),
+        expiry_date: expiry ? expiry.toISOString() : null,
       })
       .select('*, subscription_tiers:tier_id ( name, price )')
       .single();

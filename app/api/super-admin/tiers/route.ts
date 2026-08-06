@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
+import { parseTenure } from '@/lib/payments/activate';
+import { parseAddons, addonColumns, rejectAddonsOnFreeTier, missingColumnFrom } from '@/lib/plan-addons';
 
 // =====================================================================================
 // 🛡️ ADMIN — SUBSCRIPTION TIER MANAGEMENT
@@ -27,19 +29,54 @@ export async function POST(request: Request) {
     if (!b.id || !b.name || b.price === undefined) {
       return NextResponse.json({ success: false, error: 'id, name and price are required.' }, { status: 400 });
     }
+    const billingInterval = b.billing_interval || 'month';
+    const tenure = parseTenure(billingInterval, b.durationDays);
+    if (!tenure.ok) {
+      return NextResponse.json({ success: false, error: tenure.error }, { status: 400 });
+    }
+
+    // Which optional modules this plan bundles (subscription_tiers.<module>_included).
+    const addons = parseAddons(b.addons);
+    if (!addons.ok) {
+      return NextResponse.json({ success: false, error: addons.error }, { status: 400 });
+    }
+
+    const tierId = String(b.id).trim().toLowerCase().replace(/[^a-z0-9_]/g, '_');
+    const freeTierProblem = rejectAddonsOnFreeTier(tierId, addons.keys);
+    if (freeTierProblem) {
+      return NextResponse.json({ success: false, error: freeTierProblem }, { status: 400 });
+    }
+
     const row = {
-      id: String(b.id).trim().toLowerCase().replace(/[^a-z0-9_]/g, '_'),
+      id: tierId,
       name: b.name,
       description: b.description || null,
       price: parseFloat(b.price),
       currency: b.currency || 'BDT',
-      billing_interval: b.billing_interval || 'month',
+      billing_interval: billingInterval,
+      duration_days: tenure.durationDays,
       max_properties_allowed: parseInt(b.maxProperties ?? -1, 10),
       max_tenants_allowed: parseInt(b.maxTenants ?? -1, 10),
       is_active: b.isActive === undefined ? true : !!b.isActive,
       discount_percent: b.discountPercent !== undefined ? parseFloat(b.discountPercent) : 0,
+      ...addonColumns(addons.keys),
     };
-    const { data, error } = await supabaseAdminEngine.from('subscription_tiers').insert(row).select().single();
+    let { data, error } = await supabaseAdminEngine.from('subscription_tiers').insert(row).select().single();
+
+    // Pre-migration grace. Retry without whichever optional column the database doesn't have
+    // yet, so plan creation keeps working, and say loudly what needs running:
+    //   duration_days              -> ADD_PLAN_TENURE.sql
+    //   staff/accounts_included    -> ADD_STAFF.sql / ADD_ACCOUNTS.sql
+    if (['PGRST204', '42703'].includes(error?.code || '')) {
+      const missing = missingColumnFrom(error.message, row);
+      if (missing.length) {
+        console.error(`[tiers] subscription_tiers is missing ${missing.join(', ')} — run the matching migration. Creating the plan without ${missing.length === 1 ? 'it' : 'them'}.`);
+        const retry = { ...row };
+        for (const col of missing) delete (retry as any)[col];
+        ({ data, error } = await supabaseAdminEngine.from('subscription_tiers').insert(retry).select().single());
+      }
+    }
+
     if (error) throw error;
     return NextResponse.json({ success: true, data }, { status: 201 });
   } catch (err: any) {

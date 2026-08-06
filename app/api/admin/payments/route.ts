@@ -111,7 +111,11 @@ export async function POST(request: NextRequest) {
           owner_email: ownerEmail,
           provider: DEFAULT_PROVIDER_ID,
           tier_id: tier.id,
-          amount: amount != null && amount !== '' ? Number(amount) : Number(tier.price || 0),
+          // Default to what the owner is actually shown: the price AFTER any admin discount.
+          // Defaulting to the list price billed them for a discount they were quoted.
+          amount: amount != null && amount !== ''
+            ? Number(amount)
+            : Number(tier.price || 0) * (1 - Number(tier.discount_percent || 0) / 100),
           sender_msisdn: parsedMsisdn.value,
           txn_id: String(txnId).trim(),
           status: 'pending',

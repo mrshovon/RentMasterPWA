@@ -132,6 +132,50 @@ export async function POST(request: NextRequest) {
   }
 }
 
+/**
+ * Resolve the date an owner's account was created — the cutoff for their notice feed.
+ *
+ * This used to be a bare `await getUserById()` inside a try/catch, which had a hole big
+ * enough to be the whole bug: supabase-js returns `{ data, error }` rather than throwing, so
+ * an auth-API *error* never reached the catch. It just produced `undefined -> null`, the
+ * `.gte()` was silently skipped, and the reader got the entire historical feed. That API
+ * does fail intermittently, so the symptom was "sometimes I see notices from before I
+ * signed up" — which is exactly what was reported.
+ *
+ * Now: check the error, retry once (these failures are transient), then fall back to
+ * `user_profiles.created_at`, which is written by the signup upsert and is a good proxy.
+ * Only if every source fails do we serve unfiltered, and then we say so loudly.
+ */
+async function resolveOwnerJoinDate(ownerId: string): Promise<{ joinedAt: string | null; source: string }> {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const { data, error } = await supabaseAdminEngine.auth.admin.getUserById(ownerId);
+      if (!error && data?.user?.created_at) {
+        return { joinedAt: data.user.created_at, source: 'auth.users' };
+      }
+      console.warn(`[notices] getUserById attempt ${attempt} gave no signup date for ${ownerId}:`, error?.message || 'no user');
+    } catch (err) {
+      console.warn(`[notices] getUserById attempt ${attempt} threw for ${ownerId}:`, err);
+    }
+  }
+
+  // Fallback: the profile mirror. Created by the signup upsert, so its created_at default
+  // lands within seconds of the real signup.
+  const { data: profile, error: profileErr } = await supabaseAdminEngine
+    .from('user_profiles').select('created_at').eq('id', ownerId).maybeSingle();
+  if (!profileErr && profile?.created_at) {
+    console.warn(`[notices] falling back to user_profiles.created_at for ${ownerId}`);
+    return { joinedAt: profile.created_at, source: 'user_profiles' };
+  }
+
+  console.error(
+    `[notices] could not resolve a signup date for owner ${ownerId} from auth.users OR ` +
+    `user_profiles — serving the UNFILTERED feed, so this reader may see notices published ` +
+    `before their account existed.`
+  );
+  return { joinedAt: null, source: 'unresolved' };
+}
+
 // =====================================================================================
 // 🚀 ADAPTIVE NOTICE FETCH LAYER: STREAM RELEVANT ANNOUNCEMENTS PLACARDS (GET)
 // =====================================================================================
@@ -152,11 +196,14 @@ export async function GET(request: NextRequest) {
 
     // When this account was created. Notices predating it are somebody else's history — a tenant
     // who moved in this month has no business reading last year's building announcements.
-    // Resolved per role below; null means "couldn't tell", and we deliberately FAIL OPEN (serve
-    // the unfiltered feed). Note this is the opposite of the audience filter's fail-closed rule
-    // further down: an unresolved owner there would leak another building's notices, whereas an
-    // unresolved join date only risks showing older ones of the reader's OWN feed.
+    //
+    // Resolved per role below. `null` means "couldn't tell", in which case we still fail OPEN
+    // (serve the unfiltered feed) rather than show an empty Notices tab — but that path is now
+    // a genuine last resort, not the quiet default it used to be. See resolveOwnerJoinDate().
     let joinedAt: string | null = null;
+    // Which source the cutoff came from, surfaced in the response so this is diagnosable in
+    // production instead of guessable.
+    let joinedAtSource = 'none';
 
     const runQuery = (filter: string[]) => {
       let query = supabaseAdminEngine
@@ -176,11 +223,20 @@ export async function GET(request: NextRequest) {
       // Their owner, so an 'all_tenants' broadcast stays inside the building it was written for.
       // Previously this matched every 'all_tenants' row regardless of sender, so one owner's
       // announcement was readable by every other owner's tenants.
-      const { data: tenantRow } = await supabaseAdminEngine
+      const { data: tenantRow, error: tenantRowErr } = await supabaseAdminEngine
         .from('tenants').select('owner_id, created_at').eq('id', tenantId).maybeSingle();
       const theirOwnerId = tenantRow?.owner_id ?? null;
       // Onboarding date rides along on the row we already had to fetch — no extra round-trip.
+      // A tenant's "signup" is when their owner onboarded them, which is exactly created_at:
+      // notices sent between onboarding and their first login were still addressed to them.
       joinedAt = tenantRow?.created_at ?? null;
+      joinedAtSource = joinedAt ? 'tenants.created_at' : 'unresolved';
+      if (!joinedAt) {
+        console.error(
+          `[notices] no onboarding date for tenant ${tenantId} (${tenantRowErr?.message || 'row missing'}) — ` +
+          `serving the UNFILTERED feed for this reader.`
+        );
+      }
 
       clauses = [
         'and(target_scope.eq.everyone,sender_type.eq.system_admin)',
@@ -198,16 +254,9 @@ export async function GET(request: NextRequest) {
       // owners, to everyone, or to this owner specifically.
       console.log(`[NOTICE GATEWAY] Fetching portfolio notices dashboard feed for owner runtime profile: ${ownerId}`);
 
-      // Owners are Supabase auth users; auth.users.created_at is the only trustworthy signup
-      // date (user_profiles is a best-effort mirror that never writes one — see
-      // app/api/auth/signup/route.ts). Only trims admin bulletins in practice: an owner's own
-      // notices postdate their signup by definition.
-      try {
-        const { data: authOwner } = await supabaseAdminEngine.auth.admin.getUserById(ownerId);
-        joinedAt = authOwner?.user?.created_at ?? null;
-      } catch (joinDateErr) {
-        console.error('[notices] could not resolve owner signup date; serving the full feed:', joinDateErr);
-      }
+      const resolved = await resolveOwnerJoinDate(ownerId);
+      joinedAt = resolved.joinedAt;
+      joinedAtSource = resolved.source;
 
       clauses = [
         `sender_id.eq.${ownerId}`,
@@ -238,6 +287,11 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({
       success: true,
       scopingScope: dynamicTraceLogContext,
+      // Where the "published after you joined" cutoff came from. `source: 'unresolved'` means
+      // the feed was NOT trimmed — the one state in which a reader can see notices published
+      // before their account existed. Reported rather than inferred, so it is diagnosable.
+      joinedAt,
+      joinedAtSource,
       count: processedNotices?.length || 0,
       data: processedNotices
     }, { status: 200 });

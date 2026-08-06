@@ -22,18 +22,29 @@ export type FeatureKey = 'staff' | 'accounts';
 
 export const FEATURE_KEYS: FeatureKey[] = ['staff', 'accounts'];
 
-// Human-facing names, used in the 403 message the UI surfaces.
-const FEATURE_LABELS: Record<FeatureKey, string> = {
+// Human-facing names, used in the 403 message the UI surfaces and when naming a module in the
+// admin console's "this will remove access" warning.
+export const FEATURE_LABELS: Record<FeatureKey, string> = {
   staff: 'Staff management',
   accounts: 'Accounts & bookkeeping',
 };
 
 // Which subscription_tiers column bundles each feature into a plan. A column per feature keeps
 // "which plans include X" editable from the admin console without a code change.
-const TIER_COLUMN: Record<FeatureKey, string> = {
+//
+// Exported so /api/super-admin/tiers can write these flags off FEATURE_KEYS instead of naming
+// the columns itself — that way a third paid module needs no change to the tier routes.
+export const TIER_COLUMN: Record<FeatureKey, string> = {
   staff: 'staff_included',
   accounts: 'accounts_included',
 };
+
+// The Free baseline can never bundle a paid module: 'free_tier' is also the sentinel tierId that
+// resolveOwnerSubscription returns for an owner with NO plan row at all, so a module bundled
+// there would be handed to every planless owner on the platform. Enforced for real in
+// tierIncludes() below; exported so the tier routes can reject the attempt up front with a
+// useful message rather than silently saving a flag that does nothing.
+export const FREE_TIER_ID = 'free_tier';
 
 export interface FeatureState {
   enabled: boolean;
@@ -58,7 +69,7 @@ async function tierIncludes(tierId: string | null, column: string): Promise<bool
   // 'free_tier' is both the sentinel resolveOwnerSubscription uses for a planless owner AND the
   // real free tier's id, so short-circuiting it costs nothing and enforces "the free tier never
   // bundles a paid module" outright. An admin can still grant it per-owner via owner_addons.
-  if (!tierId || tierId === 'free_tier') return false;
+  if (!tierId || tierId === FREE_TIER_ID) return false;
   const { data, error } = await supabaseAdminEngine
     .from('subscription_tiers')
     .select(column)
