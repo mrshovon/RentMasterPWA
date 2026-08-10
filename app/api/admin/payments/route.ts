@@ -6,6 +6,7 @@ import { DEFAULT_PROVIDER_ID } from '@/lib/payments/registry';
 import { validatePhone } from '@/lib/validate';
 import { resolveOwnerSubscription, tierVisibleToOwner, tierIsOneTime, ownerUsedTierIds } from '@/lib/subscription';
 import crypto from 'crypto';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // PAYMENT SUBMISSIONS — OWNER SIDE
@@ -37,9 +38,8 @@ export async function GET(request: NextRequest) {
     if (error) throw error;
 
     return NextResponse.json({ success: true, count: data?.length || 0, data: data || [] }, { status: 200 });
-  } catch (err: any) {
-    console.error('[payments] owner GET error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 
@@ -142,8 +142,7 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (insertError) {
-      console.error('[payments] insert failed:', insertError);
-      return NextResponse.json({ success: false, error: insertError.message }, { status: 500 });
+      return apiError(request, insertError);
     }
 
     // Buzz the system admins. Fire-and-forget: a push failure must never fail the submission.
@@ -159,8 +158,7 @@ export async function POST(request: NextRequest) {
     }
 
     return NextResponse.json({ success: true, data: row }, { status: 201 });
-  } catch (err: any) {
-    console.error('[payments] POST crash:', err);
-    return NextResponse.json({ success: false, error: err.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

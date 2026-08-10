@@ -4,6 +4,7 @@ import { supabaseAdminEngine } from '../../../../lib/supabase-server';
 import { assertOwnerCanWrite, resolveOwnerSubscription, assertItemEnabled } from '../../../../lib/subscription';
 import { sendPushToUsers } from '../../../../lib/push-send';
 import crypto from 'crypto';
+import { apiError } from '@/lib/api-response';
 
 
 // ====================================================================
@@ -29,8 +30,7 @@ export async function GET(request: NextRequest) {
       .order('created_at', { ascending: false });
 
     if (ledgerFetchException) {
-      console.error('Supabase Core Billing Fetch Error:', ledgerFetchException);
-      return NextResponse.json({ error: ledgerFetchException.message }, { status: 500 });
+      return apiError(request, ledgerFetchException);
     }
 
     // 3. Dispatch structured clean stream matrix back to UI Consumer Client
@@ -40,9 +40,8 @@ export async function GET(request: NextRequest) {
       data: billingLedgerRecords 
     }, { status: 200 });
 
-  } catch (runtimeExceptionCatch: any) {
-    console.error('Fatal Pipeline Execution Billing GET Route Crash:', runtimeExceptionCatch);
-    return NextResponse.json({ error: runtimeExceptionCatch.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (runtimeExceptionCatch) {
+    return apiError(request, runtimeExceptionCatch);
   }
 }
 
@@ -115,8 +114,7 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (billingInsertError) {
-      console.error('Supabase Billing Ledger Write Error:', billingInsertError);
-      return NextResponse.json({ error: billingInsertError.message }, { status: 500 });
+      return apiError(request, billingInsertError);
     }
 
     // Fire-and-forget Web Push to the tenant being billed (never fail the response on push).
@@ -133,8 +131,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ success: true, data: billingRecord }, { status: 201 });
 
-  } catch (runtimeExceptionCatch: any) {
-    console.error('Fatal Pipeline Execution Billing Core Route Crash:', runtimeExceptionCatch);
-    return NextResponse.json({ error: runtimeExceptionCatch.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (runtimeExceptionCatch) {
+    return apiError(request, runtimeExceptionCatch);
   }
 }

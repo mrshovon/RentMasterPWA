@@ -31,6 +31,13 @@ export interface OwnerSubscription {
   limits: { maxProperties: number; maxTenants: number }; // -1 = unlimited
   permissionsRevoked: boolean;
   lockReason: 'expired' | 'revoked' | null;
+  /**
+   * Set when a paid plan ran out and this owner has been dropped to Free. Null the rest of the
+   * time, including while they are still in grace. The UI reads it to say WHICH plan ended
+   * instead of a bare "you're on the free plan", and the subscriptions cron uses it to decide
+   * that a downgrade notification is due.
+   */
+  downgradedFrom: { tierId: string; tierName: string; endedAt: string | null } | null;
 }
 
 // "Free" here means the perpetual Free baseline, not merely "costs nothing". A tier that
@@ -117,7 +124,11 @@ async function loadFreeLimits(): Promise<{ maxProperties: number; maxTenants: nu
   };
 }
 
-function freeState(limits: { maxProperties: number; maxTenants: number }, revoked: boolean): OwnerSubscription {
+function freeState(
+  limits: { maxProperties: number; maxTenants: number },
+  revoked: boolean,
+  downgradedFrom: OwnerSubscription['downgradedFrom'] = null,
+): OwnerSubscription {
   return {
     tierId: 'free_tier',
     tierName: 'Free Baseline',
@@ -133,6 +144,7 @@ function freeState(limits: { maxProperties: number; maxTenants: number }, revoke
     limits,
     permissionsRevoked: revoked,
     lockReason: revoked ? 'revoked' : null,
+    downgradedFrom,
   };
 }
 
@@ -200,18 +212,58 @@ export async function resolveOwnerSubscription(ownerId: string): Promise<OwnerSu
     return freeState(await loadFreeLimits(), permissionsRevoked);
   }
 
+  // An admin revoke is a hard lock and outranks everything below — it is a deliberate act against
+  // this specific account, not the ordinary end of a billing period, and it must not be softened
+  // into "you're on the free plan now".
+  if (permissionsRevoked) {
+    return {
+      tierId: tier.id,
+      tierName: tier.name || tier.id,
+      interval: tier.billing_interval || 'month',
+      price: Number(tier.price || 0),
+      isFree: false,
+      status: 'locked',
+      expiryDate: endRaw || null,
+      daysUntilExpiry: Math.ceil((end - now) / DAY_MS),
+      graceEndsAt: new Date(graceEnd).toISOString(),
+      daysLeftInGrace: null,
+      warnExpiringSoon: false,
+      limits,
+      permissionsRevoked: true,
+      lockReason: 'revoked',
+      downgradedFrom: null,
+    };
+  }
+
+  // GRACE IS OVER ⇒ DROP TO FREE, rather than locking on the old tier forever.
+  //
+  // This used to end in `status: 'locked'` with the paid tier's limits still attached, which had
+  // two problems. The owner was fully walled out — every write 403'd — so "renew to continue" was
+  // a demand rather than an offer; and they were nominally still on a plan they had stopped
+  // paying for, which is why nothing in the app could ever say "you have been downgraded".
+  //
+  // Now they land on the Free baseline: 2 properties, 2 tenants, add-ons off (lib/features.ts
+  // never bundles anything on free_tier). Nothing is deleted — getDisabledItemIds() greys out
+  // everything past the limit as read-only, which is machinery that already existed for exactly
+  // this shape of problem. They keep working at a reduced level, and the pressure to buy comes
+  // from seeing their own data go quiet rather than from a wall.
+  //
+  // Resolved at READ time, like the one-time-trial fallback above, so it is correct the moment
+  // grace lapses even if the notification cron never runs.
+  if (now >= graceEnd) {
+    return freeState(await loadFreeLimits(), false, {
+      tierId: tier.id,
+      tierName: tier.name || tier.id,
+      endedAt: endRaw || null,
+    });
+  }
+
   let status: OwnerSubscription['status'];
   let lockReason: OwnerSubscription['lockReason'] = null;
-  if (permissionsRevoked) {
-    status = 'locked';
-    lockReason = 'revoked';
-  } else if (now < end) {
+  if (now < end) {
     status = 'active';
-  } else if (now < graceEnd) {
-    status = 'grace';
   } else {
-    status = 'locked';
-    lockReason = 'expired';
+    status = 'grace';
   }
 
   const daysUntilExpiry = Math.ceil((end - now) / DAY_MS); // negative once expired
@@ -233,6 +285,7 @@ export async function resolveOwnerSubscription(ownerId: string): Promise<OwnerSu
     limits,
     permissionsRevoked,
     lockReason,
+    downgradedFrom: null, // still on the plan — grace is not a downgrade
   };
 }
 

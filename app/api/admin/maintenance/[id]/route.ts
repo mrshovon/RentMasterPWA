@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../../lib/supabase-server';
 import { assertOwnerCanWrite } from '../../../../../lib/subscription';
 import { sendPushToUsers } from '../../../../../lib/push-send';
+import { apiError } from '@/lib/api-response';
 
 // ==============================================================================
 // 🚀 MAINTENANCE MUTATOR: owner updates a ticket's resolution status + remarks.
@@ -52,8 +53,7 @@ export async function PATCH(
       .single();
 
     if (error) {
-      console.error('Supabase Maintenance Update Error:', error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return apiError(request, error);
     }
 
     // Tell the tenant who raised it that the status moved. Fire-and-forget: a push
@@ -73,8 +73,7 @@ export async function PATCH(
     }
 
     return NextResponse.json({ success: true, data }, { status: 200 });
-  } catch (e: any) {
-    console.error('Maintenance PATCH Route Crash:', e);
-    return NextResponse.json({ error: e.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (e) {
+    return apiError(request, e);
   }
 }

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../lib/supabase-server';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 🚀 OCCUPANCY HISTORY: past tenants archived for a property (written on vacate).
@@ -20,13 +21,11 @@ export async function GET(request: NextRequest) {
       .order('archived_at', { ascending: false });
 
     if (error) {
-      console.error('Occupancy History Fetch Error:', error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return apiError(request, error);
     }
 
     return NextResponse.json({ success: true, count: data?.length || 0, data }, { status: 200 });
-  } catch (e: any) {
-    console.error('Occupancy GET Route Crash:', e);
-    return NextResponse.json({ error: e.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (e) {
+    return apiError(request, e);
   }
 }

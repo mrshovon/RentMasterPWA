@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../../lib/supabase-server';
 import { isTenantLoginBlocked, TENANT_BLOCKED_MESSAGE } from '../../../../../lib/tenant-access';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 🚀 TENANT SELF-PROFILE ENGINE: returns the signed-in tenant's own record joined with
@@ -26,8 +27,7 @@ export async function GET(request: NextRequest) {
       .single();
 
     if (tenantError) {
-      console.error('Supabase Tenant Self-Profile Fetch Error:', tenantError);
-      return NextResponse.json({ error: tenantError.message }, { status: 500 });
+      return apiError(request, tenantError);
     }
 
     // Eviction path: tenant JWTs last 7 days and carry no revocation, so blocking login alone
@@ -87,9 +87,8 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ success: true, data: { tenant, property, owner } }, { status: 200 });
 
-  } catch (runtimeExceptionCatch: any) {
-    console.error('Fatal Pipeline Execution Tenant Self-Profile Route Crash:', runtimeExceptionCatch);
-    return NextResponse.json({ error: runtimeExceptionCatch.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (runtimeExceptionCatch) {
+    return apiError(request, runtimeExceptionCatch);
   }
 }
 
@@ -124,7 +123,7 @@ export async function PATCH(request: NextRequest) {
       .eq('id', tenantId)
       .single();
     if (readError) {
-      return NextResponse.json({ error: readError.message }, { status: 500 });
+      return apiError(request, readError);
     }
     if (isTenantLoginBlocked(existing as any)) {
       return NextResponse.json({ error: TENANT_BLOCKED_MESSAGE, code: 'LOGIN_BLOCKED' }, { status: 403 });
@@ -158,13 +157,11 @@ export async function PATCH(request: NextRequest) {
       .select('id, name, phone, family_members')
       .single();
     if (updateError) {
-      console.error('Tenant self-edit update error:', updateError);
-      return NextResponse.json({ error: updateError.message }, { status: 500 });
+      return apiError(request, updateError);
     }
 
     return NextResponse.json({ success: true, data: updatedTenant }, { status: 200 });
-  } catch (runtimeExceptionCatch: any) {
-    console.error('Fatal Pipeline Execution Tenant Self-Edit Route Crash:', runtimeExceptionCatch);
-    return NextResponse.json({ error: runtimeExceptionCatch.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (runtimeExceptionCatch) {
+    return apiError(request, runtimeExceptionCatch);
   }
 }

@@ -4,6 +4,7 @@ import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { assertOwnerCanWrite } from '@/lib/subscription';
 import { assertFeature } from '@/lib/features';
 import { ownerId, STAFF_SELECT, staffFieldsFrom, resolvePropertyId, ownsStaff } from '@/lib/staff';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 👷 STAFF — SINGLE RECORD (OWNER)
@@ -45,9 +46,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       .order('paid_on', { ascending: false });
 
     return NextResponse.json({ success: true, data: row, payments: payments || [] }, { status: 200 });
-  } catch (err: any) {
-    console.error('[staff/:id] GET error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 
@@ -101,9 +101,8 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     if (error) throw error;
 
     return NextResponse.json({ success: true, data: row }, { status: 200 });
-  } catch (err: any) {
-    console.error('[staff/:id] PATCH error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 
@@ -132,8 +131,7 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
     if (error) throw error;
 
     return NextResponse.json({ success: true, message: 'Staff member removed.' }, { status: 200 });
-  } catch (err: any) {
-    console.error('[staff/:id] DELETE error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

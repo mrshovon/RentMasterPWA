@@ -4,6 +4,7 @@ import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { assertOwnerCanWrite } from '@/lib/subscription';
 import { assertFeature } from '@/lib/features';
 import { ownerId } from '@/lib/accounts';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 💵 ACCOUNT TRANSACTION — DELETE (OWNER)
@@ -44,8 +45,7 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
     if (error) throw error;
 
     return NextResponse.json({ success: true, message: 'Transaction deleted.' }, { status: 200 });
-  } catch (err: any) {
-    console.error('[accounts/transactions/:id] DELETE error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

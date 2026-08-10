@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../../../lib/supabase-server';
+import { apiError } from '@/lib/api-response';
 
 // ==============================================================================
 // 🚀 TRACKER EXTRACTOR: ISOLATED SPECIFIC TENANT-WISE INVOICE BILLING HISTORY GET HANDLER
@@ -42,8 +43,7 @@ export async function GET(request: NextRequest,{ params }: { params: Promise<{ t
       .order('created_at', { ascending: false });
 
     if (historyFetchDatabaseException) {
-      console.error('Supabase Isolated Tenant Ledger Query Failure Status Exception:', historyFetchDatabaseException);
-      return NextResponse.json({ error: historyFetchDatabaseException.message }, { status: 500 });
+      return apiError(request, historyFetchDatabaseException);
     }
 
     // 4. Returning standalone single array context payload format values mapping back to interface tables grids
@@ -55,8 +55,7 @@ export async function GET(request: NextRequest,{ params }: { params: Promise<{ t
       data: tenantHistoryLedgerRecords
     }, { status: 200 });
 
-  } catch (runtimeExceptionCatch: any) {
-    console.error('Fatal Pipeline Execution Standalone Tenant History Route Crash:', runtimeExceptionCatch);
-    return NextResponse.json({ error: runtimeExceptionCatch.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (runtimeExceptionCatch) {
+    return apiError(request, runtimeExceptionCatch);
   }
 }

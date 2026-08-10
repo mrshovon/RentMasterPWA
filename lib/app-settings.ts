@@ -95,3 +95,39 @@ export const isContainerId = (v: string) => /^GTM-[A-Z0-9]{4,20}$/.test(v);
 
 export const getAnalyticsConfig = () =>
   getSetting<AnalyticsConfig>('analytics_config', DEFAULT_ANALYTICS_CONFIG);
+
+// -------------------------------------------------------------------------------------
+// BREVO — admin-managed transactional email, so the account can be connected (or swapped,
+// or switched off) from the admin panel without a redeploy.
+//
+// This is the FIRST secret ever stored in this table, and it changes the rules for it. A GA
+// measurement id ships in the page source of every site that uses one; a Brevo API key sends mail
+// as you. So:
+//
+//   * `apiKeyEnc` holds an AES-256-GCM envelope from lib/field-crypto.ts, never the key itself —
+//     a database dump is then not a mail account. The `v1:` prefix makes rotation possible later.
+//   * The admin GET route must NEVER return it. It returns `hasApiKey` + a masked preview, and
+//     treats an empty key on write as "keep the existing one". There is no read-back path at all.
+//   * There is deliberately no public `/api/app/brevo-config` counterpart, unlike analytics.
+//     Nothing in the browser has any business knowing this exists.
+//
+// When `enabled` is false — or the key will not decrypt — every send is skipped and password
+// recovery falls back to Supabase's built-in mailer, which is what shipped before this.
+// -------------------------------------------------------------------------------------
+export interface BrevoConfig {
+  enabled: boolean;
+  apiKeyEnc: string;      // encryptField(<brevo api key>), or '' when never configured
+  senderEmail: string;    // must be a verified sender on the Brevo account, or sends 4xx
+  senderName: string;     // the "from" name recipients see
+  replyTo: string;        // optional; falls back to senderEmail
+}
+
+export const DEFAULT_BREVO_CONFIG: BrevoConfig = {
+  enabled: false,
+  apiKeyEnc: '',
+  senderEmail: '',
+  senderName: 'Bari360',
+  replyTo: '',
+};
+
+export const getBrevoConfig = () => getSetting<BrevoConfig>('brevo_config', DEFAULT_BREVO_CONFIG);

@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { sendPushToRole } from '@/lib/push-send';
 import crypto from 'crypto';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // SUPPORT TICKETS — OWNER SIDE
@@ -73,8 +74,7 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (insertError) {
-      console.error('[support-tickets] insert failed:', insertError);
-      return NextResponse.json({ error: insertError.message }, { status: 500 });
+      return apiError(request, insertError);
     }
 
     // Buzz the system admins. Fire-and-forget: a push failure must never fail the ticket.
@@ -90,9 +90,8 @@ export async function POST(request: NextRequest) {
     }
 
     return NextResponse.json({ success: true, data: ticket }, { status: 201 });
-  } catch (err: any) {
-    console.error('[support-tickets] POST crash:', err);
-    return NextResponse.json({ error: err.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 
@@ -115,16 +114,14 @@ export async function GET(request: NextRequest) {
       .order('created_at', { ascending: false });
 
     if (error) {
-      console.error('[support-tickets] list failed:', error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return apiError(request, error);
     }
 
     return NextResponse.json(
       { success: true, count: tickets?.length || 0, data: tickets || [] },
       { status: 200 },
     );
-  } catch (err: any) {
-    console.error('[support-tickets] GET crash:', err);
-    return NextResponse.json({ error: err.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

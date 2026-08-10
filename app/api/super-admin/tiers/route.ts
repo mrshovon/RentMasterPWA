@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { parseTenure } from '@/lib/payments/activate';
 import { parseAddons, addonColumns, rejectAddonsOnFreeTier, missingColumnFrom } from '@/lib/plan-addons';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 🛡️ ADMIN — SUBSCRIPTION TIER MANAGEMENT
@@ -9,7 +10,7 @@ import { parseAddons, addonColumns, rejectAddonsOnFreeTier, missingColumnFrom } 
 // POST -> create a new tier
 // Requires the tiers migration: is_active boolean, discount_percent numeric.
 // =====================================================================================
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const { data, error } = await supabaseAdminEngine
       .from('subscription_tiers')
@@ -17,9 +18,8 @@ export async function GET() {
       .order('price', { ascending: true });
     if (error) throw error;
     return NextResponse.json({ success: true, count: data?.length || 0, data }, { status: 200 });
-  } catch (err: any) {
-    console.error('Admin Tiers GET error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 
@@ -83,8 +83,7 @@ export async function POST(request: Request) {
 
     if (error) throw error;
     return NextResponse.json({ success: true, data }, { status: 201 });
-  } catch (err: any) {
-    console.error('Admin Tiers POST error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getPaymentConfig, setSetting, DEFAULT_PAYMENT_CONFIG } from '@/lib/app-settings';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // PAYMENT SETUP — ADMIN
@@ -11,13 +12,12 @@ import { getPaymentConfig, setSetting, DEFAULT_PAYMENT_CONFIG } from '@/lib/app-
 // Admin-only via the /api/super-admin/* gate in middleware.ts.
 // =====================================================================================
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const config = await getPaymentConfig();
     return NextResponse.json({ success: true, data: config }, { status: 200 });
-  } catch (err: any) {
-    console.error('Payment config GET error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 
@@ -32,8 +32,7 @@ export async function PUT(request: NextRequest) {
     };
     await setSetting('payment_config', config);
     return NextResponse.json({ success: true, data: config }, { status: 200 });
-  } catch (err: any) {
-    console.error('Payment config PUT error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

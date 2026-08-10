@@ -5,6 +5,7 @@ import { assertOwnerCanWrite } from '@/lib/subscription';
 import { assertFeature } from '@/lib/features';
 import { ownerId } from '@/lib/staff';
 import { reverseAutoTransaction } from '@/lib/accounts';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 💵 STAFF SALARY PAYMENT — DELETE (OWNER)
@@ -50,8 +51,7 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
     }
 
     return NextResponse.json({ success: true, message: 'Payment deleted.' }, { status: 200 });
-  } catch (err: any) {
-    console.error('[staff/payments/:id] DELETE error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

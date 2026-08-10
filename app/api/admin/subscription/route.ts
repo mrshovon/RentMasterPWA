@@ -7,6 +7,7 @@ import {
 } from '@/lib/subscription';
 import { resolveOwnerFeatures } from '@/lib/features';
 import { computeExpiry } from '@/lib/payments/activate';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 🧾 OWNER — MY SUBSCRIPTION
@@ -57,9 +58,30 @@ export async function GET(request: NextRequest) {
       .filter((t) => tierVisibleToOwner(t, sub.tierId))
       .map((t) => ({ ...t, oneTimeUsed: tierIsOneTime(t) && usedTierIds.has(t.id) }));
 
+    // The newest lifecycle event this owner has not acknowledged, if any. Drives the one-time
+    // "your plan has ended" modal on the dashboard. Failure here is non-fatal — a missing
+    // plan_events table (migration unrun) must not take the whole Plan tab down with it.
+    let pendingEvent: { id: string; event: string; tierName: string | null; endedAt: string | null } | null = null;
+    try {
+      const { data: ev } = await supabaseAdminEngine
+        .from('plan_events')
+        .select('id, event, tier_name, ref')
+        .eq('owner_id', uid)
+        .is('seen_at', null)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (ev) {
+        pendingEvent = { id: ev.id, event: ev.event, tierName: ev.tier_name, endedAt: ev.ref || null };
+      }
+    } catch {
+      /* migration not run yet — the dashboard simply shows no modal */
+    }
+
     return NextResponse.json({
       success: true,
       subscription: sub,
+      pendingEvent,
       features,
       usage: {
         properties: { current: usage.properties, limit: sub.limits.maxProperties },
@@ -68,9 +90,8 @@ export async function GET(request: NextRequest) {
       disabled: { propertyIds: disabledPropertyIds, tenantIds: disabledTenantIds },
       availableTiers: tiers || [],
     }, { status: 200 });
-  } catch (err: any) {
-    console.error('Owner subscription GET error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 
@@ -173,8 +194,7 @@ export async function POST(request: NextRequest) {
       message: isFree ? 'Free plan activated.' : `${tier.name} activated.`,
       subscription: sub,
     }, { status: 201 });
-  } catch (err: any) {
-    console.error('Owner subscription POST error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

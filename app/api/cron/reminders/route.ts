@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { deliverReminder, type ReminderRow } from '@/lib/reminders';
+import { apiError } from '@/lib/api-response';
+import { logEvent, describeError } from '@/lib/logger';
 
 // =====================================================================================
 // CRON — deliver due rent reminders. Public path (middleware only gates /api/admin,
@@ -33,8 +35,7 @@ async function run(request: NextRequest) {
     .eq('status', 'pending')
     .lte('scheduled_date', todayStr());
   if (error) {
-    console.error('[cron/reminders] query failed:', error);
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return apiError(request, error, { source: 'cron' });
   }
 
   let reminders = 0;
@@ -44,7 +45,16 @@ async function run(request: NextRequest) {
       notified += await deliverReminder(r as ReminderRow);
       reminders++;
     } catch (e) {
-      console.error('[cron/reminders] delivery failed for', r.id, e);
+      // One tenant's failed delivery must not abandon the rest of the run, so this is caught and
+      // recorded rather than thrown. Logged to app_logs as well as the console: a cron failure
+      // happens at 06:00 with nobody watching, which is exactly the case runtime logs lose.
+      await logEvent({
+        source: 'cron',
+        message: `Reminder delivery failed for ${r.id}`,
+        detail: describeError(e).detail,
+        route: '/api/cron/reminders',
+        context: { reminderId: r.id },
+      });
     }
   }
 

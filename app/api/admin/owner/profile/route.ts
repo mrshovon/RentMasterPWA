@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { validatePhone } from '@/lib/validate';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 👤 ACCOUNT PROFILE — owner AND super-admin self-service (both are Supabase auth users).
@@ -34,7 +35,7 @@ export async function GET(request: NextRequest) {
     if (!uid) return NextResponse.json({ error: 'Unauthorized.' }, { status: 401 });
 
     const { data, error } = await supabaseAdminEngine.auth.admin.getUserById(uid);
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return apiError(request, error);
     const user = data?.user;
     if (!user) return NextResponse.json({ error: 'Account not found.' }, { status: 404 });
 
@@ -48,9 +49,8 @@ export async function GET(request: NextRequest) {
         role: meta.role || 'owner',
       },
     }, { status: 200 });
-  } catch (err: any) {
-    console.error('Account profile GET crash:', err);
-    return NextResponse.json({ error: err.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 
@@ -96,7 +96,7 @@ export async function PATCH(request: NextRequest) {
 
     const { data: updated, error: updErr } =
       await supabaseAdminEngine.auth.admin.updateUserById(uid, { user_metadata: meta });
-    if (updErr) return NextResponse.json({ error: updErr.message }, { status: 500 });
+    if (updErr) return apiError(request, updErr);
 
     return NextResponse.json({
       success: true,
@@ -107,8 +107,7 @@ export async function PATCH(request: NextRequest) {
         role: meta.role || 'owner',
       },
     }, { status: 200 });
-  } catch (err: any) {
-    console.error('Account profile PATCH crash:', err);
-    return NextResponse.json({ error: err.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

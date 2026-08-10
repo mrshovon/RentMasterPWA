@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../lib/supabase-server';
 import { assertOwnerCanWrite, resolveOwnerSubscription, assertItemEnabled } from '../../../../lib/subscription';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 🚀 DOCUMENTS ENGINE: per-tenant documents (deeds, agreements) uploaded by the owner
@@ -26,14 +27,12 @@ export async function GET(request: NextRequest) {
       .order('created_at', { ascending: false });
 
     if (error) {
-      console.error('Documents Fetch Error:', error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return apiError(request, error);
     }
 
     return NextResponse.json({ success: true, count: data?.length || 0, data }, { status: 200 });
-  } catch (e: any) {
-    console.error('Documents GET Route Crash:', e);
-    return NextResponse.json({ error: e.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (e) {
+    return apiError(request, e);
   }
 }
 
@@ -72,13 +71,11 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (error) {
-      console.error('Documents Insert Error:', error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return apiError(request, error);
     }
 
     return NextResponse.json({ success: true, data }, { status: 201 });
-  } catch (e: any) {
-    console.error('Documents POST Route Crash:', e);
-    return NextResponse.json({ error: e.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (e) {
+    return apiError(request, e);
   }
 }

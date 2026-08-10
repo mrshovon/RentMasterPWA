@@ -3,6 +3,9 @@ import { supabaseClient, supabaseAdminEngine } from '@/lib/supabase-server';
 import { getDefaultSignupTier } from '@/lib/app-settings';
 import { activateSubscription } from '@/lib/payments/activate';
 import { validateEmail, validatePhone } from '@/lib/validate';
+import { sendEmail } from '@/lib/email/brevo';
+import { accountCreated } from '@/lib/email/templates';
+import { resolveAppBaseUrl } from '@/lib/public-url';
 
 // =====================================================================================
 // 🔐 OWNER SELF-SIGNUP — public route (not behind middleware auth, like login/forgot).
@@ -115,6 +118,16 @@ export async function POST(request: Request) {
       // Never fail signup because the default plan couldn't be applied — the owner is free by default.
       console.error('[signup] default plan grant failed (non-fatal):', planErr);
     }
+
+    // Welcome mail. Fire-and-forget: `email_confirm: true` above means Supabase sends nothing, so
+    // without this a new owner gets no written record of the account at all. Not awaited — a slow
+    // or broken mail provider must never make signing up feel broken, and lib/email/brevo.ts
+    // records its own failures.
+    void sendEmail({
+      to: email,
+      toName: name || null,
+      ...accountCreated({ name, email, appUrl: resolveAppBaseUrl(request) }),
+    });
 
     // Sign the new owner in so the client gets a token and lands on /owner.
     const { data: session } = await supabaseClient.auth.signInWithPassword({ email, password });

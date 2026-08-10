@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { getOnlineBreakdown, countActiveUsers } from '@/lib/presence';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 📊 ADMIN — ANALYTICS
@@ -106,8 +107,7 @@ export async function GET(request: NextRequest) {
         tenantSeries: seriesFrom(tenantSignups, from, to),
       },
     }, { status: 200, headers: { 'Cache-Control': 'no-store' } });
-  } catch (err: any) {
-    console.error('Admin Analytics GET error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

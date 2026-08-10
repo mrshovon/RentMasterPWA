@@ -4,6 +4,7 @@ import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { assertOwnerCanWrite } from '@/lib/subscription';
 import { deliverReminder, type ReminderRow } from '@/lib/reminders';
 import crypto from 'crypto';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // RENT REMINDERS — OWNER
@@ -33,9 +34,8 @@ export async function GET(request: NextRequest) {
     if (error) throw error;
 
     return NextResponse.json({ success: true, count: data?.length || 0, data: data || [] }, { status: 200 });
-  } catch (err: any) {
-    console.error('[reminders] GET error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 
@@ -93,8 +93,7 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (insertError) {
-      console.error('[reminders] insert failed:', insertError);
-      return NextResponse.json({ success: false, error: insertError.message }, { status: 500 });
+      return apiError(request, insertError);
     }
 
     // Same-day/past: deliver now for instant feedback. Future: the cron picks it up.
@@ -110,8 +109,7 @@ export async function POST(request: NextRequest) {
     // Re-read so the response reflects any status/date change from immediate delivery.
     const { data: fresh } = await supabaseAdminEngine.from('reminders').select('*').eq('id', id).single();
     return NextResponse.json({ success: true, delivered, data: fresh || row }, { status: 201 });
-  } catch (err: any) {
-    console.error('[reminders] POST crash:', err);
-    return NextResponse.json({ success: false, error: err.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

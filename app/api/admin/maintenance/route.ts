@@ -4,6 +4,7 @@ import { supabaseAdminEngine } from '../../../../lib/supabase-server';
 import { assertOwnerCanWrite } from '../../../../lib/subscription';
 import { sendPushToUsers } from '../../../../lib/push-send';
 import crypto from 'crypto';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 🚀 MAINTENANCE MAINTENANCE REGISTER ENGINE: ISSUE DISPATCH ENTRY CONTROLLER ROUTE LAYER
@@ -75,8 +76,7 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (databaseInsertLogException) {
-      console.error('Supabase Maintenance Execution Logging Registry Failure:', databaseInsertLogException);
-      return NextResponse.json({ error: databaseInsertLogException.message }, { status: 500 });
+      return apiError(request, databaseInsertLogException);
     }
 
     // 3b. A tenant filed the ticket — buzz the property's owner. (When the owner files it
@@ -103,9 +103,8 @@ export async function POST(request: NextRequest) {
       data: maintenanceLogRecord 
     }, { status: 201 });
 
-  } catch (runtimeExceptionCatch: any) {
-    console.error('Fatal Pipeline Execution Maintenance Core POST Route Crash:', runtimeExceptionCatch);
-    return NextResponse.json({ error: runtimeExceptionCatch.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (runtimeExceptionCatch) {
+    return apiError(request, runtimeExceptionCatch);
   }
 }
 
@@ -159,8 +158,7 @@ export async function GET(request: NextRequest) {
       .order('created_at', { ascending: false });
 
     if (historyFetchDatabaseException) {
-      console.error('Supabase Core Multi-Scoping Maintenance Log Query Breakdown Error:', historyFetchDatabaseException);
-      return NextResponse.json({ error: historyFetchDatabaseException.message }, { status: 500 });
+      return apiError(request, historyFetchDatabaseException);
     }
 
     // 🚀 4. ACCURATE IN-MEMORY FILTERING MATCHING RE-ALIGNED TO 'owner_id' COLUMN
@@ -181,8 +179,7 @@ export async function GET(request: NextRequest) {
       data: filteredPayloadRecords
     }, { status: 200 });
 
-  } catch (runtimeExceptionCatch: any) {
-    console.error('Fatal Pipeline Execution Maintenance Adaptive GET Route Crash:', runtimeExceptionCatch);
-    return NextResponse.json({ error: runtimeExceptionCatch.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (runtimeExceptionCatch) {
+    return apiError(request, runtimeExceptionCatch);
   }
 }

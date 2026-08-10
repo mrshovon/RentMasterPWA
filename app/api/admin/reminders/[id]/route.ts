@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { deliverReminder, type ReminderRow } from '@/lib/reminders';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // RENT REMINDERS — OWNER, single-reminder actions.
@@ -51,14 +52,13 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     let delivered = 0;
     try {
       delivered = await deliverReminder(reminder as ReminderRow);
-    } catch (e: any) {
-      return NextResponse.json({ success: false, error: e.message || 'Delivery failed.' }, { status: 500 });
+    } catch (e) {
+      return apiError(request, e);
     }
     const { data: fresh } = await supabaseAdminEngine.from('reminders').select('*').eq('id', id).single();
     return NextResponse.json({ success: true, delivered, data: fresh }, { status: 200 });
-  } catch (err: any) {
-    console.error('[reminders] PATCH crash:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 
@@ -75,8 +75,7 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
       .eq('owner_id', uid);
     if (error) throw error;
     return NextResponse.json({ success: true }, { status: 200 });
-  } catch (err: any) {
-    console.error('[reminders] DELETE crash:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

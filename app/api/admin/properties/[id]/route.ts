@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../../lib/supabase-server';
 import { assertOwnerCanWrite, resolveOwnerSubscription, assertItemEnabled } from '../../../../../lib/subscription';
+import { apiError } from '@/lib/api-response';
 
 // ==============================================================================
 // 🚀 PROPERTY MUTATOR: edit unit details OR vacate the unit (archiving occupancy).
@@ -75,8 +76,7 @@ export async function PATCH(
         .single();
 
       if (vacateError) {
-        console.error('Supabase Property Vacate Error:', vacateError);
-        return NextResponse.json({ error: vacateError.message }, { status: 500 });
+        return apiError(request, vacateError);
       }
 
       // Detach the occupants. Without this the unit reads "vacant" while its tenants still
@@ -116,14 +116,12 @@ export async function PATCH(
       .single();
 
     if (updateError) {
-      console.error('Supabase Property Update Error:', updateError);
-      return NextResponse.json({ error: updateError.message }, { status: 500 });
+      return apiError(request, updateError);
     }
 
     return NextResponse.json({ success: true, data: updated }, { status: 200 });
 
-  } catch (runtimeExceptionCatch: any) {
-    console.error('Fatal Pipeline Execution Property PATCH Route Crash:', runtimeExceptionCatch);
-    return NextResponse.json({ error: runtimeExceptionCatch.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (runtimeExceptionCatch) {
+    return apiError(request, runtimeExceptionCatch);
   }
 }

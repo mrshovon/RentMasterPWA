@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../../lib/supabase-server';
 import { assertOwnerCanWrite } from '../../../../../lib/subscription';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 🚀 OWNER SIGNATURE: stored on the owner's Supabase auth user_metadata (no table needed).
@@ -13,12 +14,11 @@ export async function GET(request: NextRequest) {
     const ownerId = request.headers.get('x-rentmaster-uid');
     if (!ownerId) return NextResponse.json({ error: 'Unauthorized.' }, { status: 401 });
     const { data, error } = await supabaseAdminEngine.auth.admin.getUserById(ownerId);
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return apiError(request, error);
     const signatureUrl = (data?.user?.user_metadata as any)?.signature_url ?? null;
     return NextResponse.json({ success: true, signatureUrl }, { status: 200 });
-  } catch (e: any) {
-    console.error('Owner Signature GET Crash:', e);
-    return NextResponse.json({ error: e.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (e) {
+    return apiError(request, e);
   }
 }
 
@@ -39,11 +39,10 @@ export async function POST(request: NextRequest) {
     const meta = { ...((current?.user?.user_metadata as any) || {}), signature_url: signatureUrl };
 
     const { error } = await supabaseAdminEngine.auth.admin.updateUserById(ownerId, { user_metadata: meta });
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return apiError(request, error);
 
     return NextResponse.json({ success: true, signatureUrl }, { status: 200 });
-  } catch (e: any) {
-    console.error('Owner Signature POST Crash:', e);
-    return NextResponse.json({ error: e.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (e) {
+    return apiError(request, e);
   }
 }

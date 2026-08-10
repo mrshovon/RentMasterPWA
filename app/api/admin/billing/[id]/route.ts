@@ -6,6 +6,7 @@ import { sendPushToUsers } from '../../../../../lib/push-send';
 import { bookAutoTransaction, reverseAutoTransaction } from '../../../../../lib/accounts';
 import { ownedLedger, recalcLedger, balanceOf } from '../../../../../lib/billing';
 import crypto from 'crypto';
+import { apiError } from '@/lib/api-response';
 
 // ==============================================================================
 // 🚀 TRANSACTION MUTATOR: INDIVIDUAL INVOICE LEDGER STATUS STATUS PATCH HANDLER
@@ -115,8 +116,7 @@ export async function PATCH(
             .select('id')
             .single();
           if (payErr) {
-            console.error('[billing] settle-in-full insert failed:', payErr);
-            return NextResponse.json({ error: payErr.message }, { status: 500 });
+            return apiError(request, payErr);
           }
           try {
             await bookAutoTransaction(ownerId as string, {
@@ -152,8 +152,7 @@ export async function PATCH(
           .eq('ledger_id', billingRecordId)
           .eq('owner_id', ownerId as string);
         if (delErr) {
-          console.error('[billing] clearing payments failed:', delErr);
-          return NextResponse.json({ error: delErr.message }, { status: 500 });
+          return apiError(request, delErr);
         }
       }
 
@@ -175,8 +174,7 @@ export async function PATCH(
         .single();
 
       if (mutationDatabaseException) {
-        console.error('Supabase Mutation Ledger Registry Fail:', mutationDatabaseException);
-        return NextResponse.json({ error: mutationDatabaseException.message }, { status: 500 });
+        return apiError(request, mutationDatabaseException);
       }
       updatedLedgerRecord = data;
     }
@@ -249,8 +247,7 @@ export async function PATCH(
       data: updatedLedgerRecord
     }, { status: 200 });
 
-  } catch (runtimeExceptionCatch: any) {
-    console.error('Fatal Pipeline Execution Dynamic Billing PATCH Route Crash:', runtimeExceptionCatch);
-    return NextResponse.json({ error: runtimeExceptionCatch.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (runtimeExceptionCatch) {
+    return apiError(request, runtimeExceptionCatch);
   }
 }

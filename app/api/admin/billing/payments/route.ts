@@ -5,6 +5,7 @@ import { assertOwnerCanWrite, resolveOwnerSubscription, assertItemEnabled } from
 import { ownerId, ownedLedger, recalcLedger, PAYMENT_METHODS, BILLING_PAYMENT_SELECT } from '@/lib/billing';
 import { bookAutoTransaction } from '@/lib/accounts';
 import crypto from 'crypto';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 🧾 RENT PAYMENTS (INSTALLMENTS) — OWNER writes, TENANT reads
@@ -43,9 +44,8 @@ export async function GET(request: NextRequest) {
     if (error) throw error;
 
     return NextResponse.json({ success: true, count: data?.length || 0, data: data || [] }, { status: 200 });
-  } catch (err: any) {
-    console.error('[billing/payments] GET error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 
@@ -115,8 +115,7 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (insertError) {
-      console.error('[billing/payments] insert failed:', insertError);
-      return NextResponse.json({ success: false, error: insertError.message }, { status: 500 });
+      return apiError(request, insertError);
     }
 
     const updatedLedger = await recalcLedger(ledgerId);
@@ -140,8 +139,7 @@ export async function POST(request: NextRequest) {
     }
 
     return NextResponse.json({ success: true, data: payment, ledger: updatedLedger }, { status: 201 });
-  } catch (err: any) {
-    console.error('[billing/payments] POST crash:', err);
-    return NextResponse.json({ success: false, error: err.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

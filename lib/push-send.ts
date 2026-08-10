@@ -84,7 +84,38 @@ async function deliver(rows: TokenRow[], payload: PushPayload): Promise<PushRepo
     sendFcm(nativeTokens, payload),
   ]);
   report.attempts = [...webAttempts, ...fcmAttempts];
+  await recordFailures(report, payload);
   return report;
+}
+
+/**
+ * Write ONE aggregate log row per dispatch when deliveries failed — not one per token. A
+ * broadcast to every owner would otherwise produce hundreds of near-identical rows and bury the
+ * server errors the admin is actually looking for.
+ *
+ * Expired subscriptions are excluded: those are pruned automatically and are the normal cost of
+ * people uninstalling the app, not a fault. What this is here to catch is the class of failure
+ * that has already bitten twice — a VAPID keypair that no longer matches (403 on every send) and
+ * a missing Firebase service account — both of which are invisible from the outside because push
+ * is fire-and-forget everywhere it is called.
+ */
+async function recordFailures(report: PushReport, payload: PushPayload): Promise<void> {
+  const failures = report.attempts.filter((a) => !a.ok && !/expired/.test(a.error || ''));
+  if (!failures.length) return;
+
+  const { logEvent } = await import('./logger');
+  await logEvent({
+    level: 'warn',
+    source: 'push',
+    message: `Push delivery failed for ${failures.length} of ${report.attempts.length} device(s): ${payload.title}`,
+    detail: failures.map((f) => `${f.transport} ${f.endpointHost}: ${f.error}`).join('\n'),
+    context: {
+      configured: report.configured,
+      tokens: report.tokens,
+      failed: failures.length,
+      title: payload.title,
+    },
+  });
 }
 
 async function deliverWeb(rows: TokenRow[], payload: PushPayload): Promise<PushAttempt[]> {

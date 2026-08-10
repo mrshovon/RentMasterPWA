@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { sendPushReport, isWebPushConfigured } from '@/lib/push-send';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 🔔 PUSH SELF-TEST
@@ -51,13 +52,12 @@ export async function POST(request: NextRequest) {
       attempts: report.attempts,
       hint,
     }, { status: 200 });
-  } catch (err: any) {
-    console.error('[push] self-test failed:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 
 /** Config-only probe — no notification sent. Useful for checking a deployment quickly. */
-export async function GET() {
+export async function GET(request: Request) {
   return NextResponse.json({ success: true, configured: isWebPushConfigured() }, { status: 200 });
 }

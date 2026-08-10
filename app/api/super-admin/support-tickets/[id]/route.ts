@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { sendPushToUsers } from '@/lib/push-send';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // SUPPORT TICKETS — ADMIN STATE MACHINE
@@ -77,8 +78,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       .single();
 
     if (updateError) {
-      console.error('Admin Support Ticket PATCH error:', updateError);
-      return NextResponse.json({ success: false, error: updateError.message }, { status: 500 });
+      return apiError(request, updateError);
     }
 
     // Tell the owner their ticket moved. Fire-and-forget: never fail the response.
@@ -96,8 +96,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     }
 
     return NextResponse.json({ success: true, data: ticket }, { status: 200 });
-  } catch (err: any) {
-    console.error('Admin Support Ticket PATCH crash:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

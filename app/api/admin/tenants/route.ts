@@ -7,6 +7,7 @@ import { encryptField, hasEncryptionKey } from '../../../../lib/field-crypto';
 import { shapeTenantForOwner } from '../../../../lib/tenants';
 import { validatePhone } from '../../../../lib/validate';
 import crypto from 'crypto';
+import { apiError } from '@/lib/api-response';
 
 
 // =========================================================
@@ -35,8 +36,7 @@ export async function GET(request: NextRequest) {
       .eq('owner_id', ownerId);
 
     if (fetchError) {
-      console.error('Supabase Tenants Fetch Error:', fetchError);
-      return NextResponse.json({ error: fetchError.message }, { status: 500 });
+      return apiError(request, fetchError);
     }
 
     // NID decrypted so the owner can read and correct what they entered; credential columns
@@ -46,9 +46,8 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ success: true, count: shaped.length, data: shaped }, { status: 200 });
 
-  } catch (runtimeExceptionCatch: any) {
-    console.error('Pipeline Execution Tenants GET Critical Route Crash:', runtimeExceptionCatch);
-    return NextResponse.json({ error: runtimeExceptionCatch.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (runtimeExceptionCatch) {
+    return apiError(request, runtimeExceptionCatch);
   }
 }
 
@@ -178,8 +177,7 @@ export async function POST(request: NextRequest) {
     // tenant has no NID, and the owner's next edit would send an empty field and erase it.
     return NextResponse.json({ success: true, data: shapeTenantForOwner(tenantRecord), passcode: rawPasscode }, { status: 201 });
 
-  } catch (runtimeExceptionCatch: any) {
-    console.error('Fatal Pipeline Execution Tenant Core Route Crash:', runtimeExceptionCatch);
-    return NextResponse.json({ error: runtimeExceptionCatch.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (runtimeExceptionCatch) {
+    return apiError(request, runtimeExceptionCatch);
   }
 }

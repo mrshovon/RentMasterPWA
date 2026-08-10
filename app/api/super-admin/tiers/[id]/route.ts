@@ -6,6 +6,7 @@ import {
   parseAddons, addonColumns, addonsOnTier, rejectAddonsOnFreeTier,
   countOwnersLosingAddons, describeAffected, missingColumnFrom,
 } from '@/lib/plan-addons';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 🛡️ ADMIN — SINGLE TIER: edit fields / activate|deactivate / set discount / delete
@@ -105,13 +106,12 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
 
     if (error) throw error;
     return NextResponse.json({ success: true, data }, { status: 200 });
-  } catch (err: any) {
-    console.error('Admin Tier PATCH error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 
-export async function DELETE(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
     const { error } = await supabaseAdminEngine.from('subscription_tiers').delete().eq('id', id);
@@ -120,8 +120,7 @@ export async function DELETE(_request: NextRequest, { params }: { params: Promis
       return NextResponse.json({ success: false, error: `${error.message} (tip: deactivate the plan instead of deleting it).` }, { status: 409 });
     }
     return NextResponse.json({ success: true, message: 'Tier deleted.' }, { status: 200 });
-  } catch (err: any) {
-    console.error('Admin Tier DELETE error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

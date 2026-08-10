@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../lib/supabase-server';
 import { resolveOwnerSubscription, assertOwnerCanWrite, checkCreateLimit } from '../../../../lib/subscription';
+import { apiError } from '@/lib/api-response';
 
 // Generates a human-readable unit code like "UNIT-1234", verifying it isn't
 // already taken (the properties.id PK is a text column). Falls back to a longer
@@ -37,15 +38,13 @@ export async function GET(request: NextRequest) {
       .order('created_at', { ascending: false });
 
     if (fetchError) {
-      console.error('Supabase Properties Fetch Error:', fetchError);
-      return NextResponse.json({ error: fetchError.message }, { status: 500 });
+      return apiError(request, fetchError);
     }
 
     return NextResponse.json({ success: true, count: propertiesList.length, data: propertiesList }, { status: 200 });
 
-  } catch (runtimeExceptionCatch: any) {
-    console.error('Pipeline Execution Properties GET Critical Route Crash:', runtimeExceptionCatch);
-    return NextResponse.json({ error: runtimeExceptionCatch.message || 'Fatal Server Logic Matrix Exception.' }, { status: 500 });
+  } catch (runtimeExceptionCatch) {
+    return apiError(request, runtimeExceptionCatch);
   }
 }
 
@@ -107,14 +106,12 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (schemaWriteError) {
-      console.error('Supabase Core Schema Write Error:', schemaWriteError);
-      return NextResponse.json({ error: schemaWriteError.message }, { status: 500 });
+      return apiError(request, schemaWriteError);
     }
 
     return NextResponse.json({ success: true, data: databaseWriteResponse }, { status: 201 });
 
-  } catch (runtimeExceptionCatch: any) {
-    console.error('Pipeline Execution Critical Route Crash Error:', runtimeExceptionCatch);
-    return NextResponse.json({ error: runtimeExceptionCatch.message || 'Fatal Server Matrix Logic Crash.' }, { status: 500 });
+  } catch (runtimeExceptionCatch) {
+    return apiError(request, runtimeExceptionCatch);
   }
 }

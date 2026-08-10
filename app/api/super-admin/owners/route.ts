@@ -2,13 +2,17 @@ import { NextResponse } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { validateEmail, validatePhone } from '@/lib/validate';
 import { getPresenceFor } from '@/lib/presence';
+import { apiError } from '@/lib/api-response';
+import { sendEmail } from '@/lib/email/brevo';
+import { accountCreated } from '@/lib/email/templates';
+import { resolveAppBaseUrl } from '@/lib/public-url';
 
 // =====================================================================================
 // 🛡️ ADMIN — OWNERS DIRECTORY
 // GET  -> list all owner/admin accounts (auth users) + their latest subscription
 // POST -> create a new owner account
 // =====================================================================================
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const { data: list, error } = await supabaseAdminEngine.auth.admin.listUsers({ page: 1, perPage: 1000 });
     if (error) throw error;
@@ -48,9 +52,8 @@ export async function GET() {
     });
 
     return NextResponse.json({ success: true, count: owners.length, data: owners }, { status: 200 });
-  } catch (err: any) {
-    console.error('Admin Owners GET error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 
@@ -95,9 +98,21 @@ export async function POST(request: Request) {
       role: body.role || 'owner',
     }, { onConflict: 'id' });
 
+    // Welcome mail, fire-and-forget. Deliberately does NOT contain the password the admin just
+    // set — that goes out-of-band, the way it always has. This only tells the person an account
+    // exists and where to sign in, which they otherwise learn only if the admin remembers to say.
+    void sendEmail({
+      to: parsedEmail.value,
+      toName: body.name || null,
+      ...accountCreated({
+        name: body.name || '',
+        email: parsedEmail.value,
+        appUrl: resolveAppBaseUrl(request),
+      }),
+    });
+
     return NextResponse.json({ success: true, ownerId: authUser.user.id }, { status: 201 });
-  } catch (err: any) {
-    console.error('Admin Owners POST error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

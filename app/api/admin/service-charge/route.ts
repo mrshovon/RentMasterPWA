@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../lib/supabase-server';
 import { assertOwnerCanWrite, resolveOwnerSubscription, assertItemEnabled } from '../../../../lib/subscription';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 🚀 SERVICE CHARGE BREAKDOWN ENGINE: per-property component breakdown of the monthly
@@ -31,14 +32,12 @@ export async function GET(request: NextRequest) {
       .maybeSingle();
 
     if (error) {
-      console.error('Service Charge Fetch Error:', error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return apiError(request, error);
     }
 
     return NextResponse.json({ success: true, data: data || null }, { status: 200 });
-  } catch (e: any) {
-    console.error('Service Charge GET Route Crash:', e);
-    return NextResponse.json({ error: e.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (e) {
+    return apiError(request, e);
   }
 }
 
@@ -69,13 +68,11 @@ export async function PUT(request: NextRequest) {
       .single();
 
     if (error) {
-      console.error('Service Charge Upsert Error:', error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return apiError(request, error);
     }
 
     return NextResponse.json({ success: true, data }, { status: 200 });
-  } catch (e: any) {
-    console.error('Service Charge PUT Route Crash:', e);
-    return NextResponse.json({ error: e.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (e) {
+    return apiError(request, e);
   }
 }

@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { sendPushToUsers } from '@/lib/push-send';
 import crypto from 'crypto';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 👋 ADMIN — WELCOME NEW USERS
@@ -115,9 +116,8 @@ export async function GET(request: NextRequest) {
       // the whole directory to the browser.
       sample: recipients.slice(0, 5).map((r) => ({ name: r.name, role: r.role, joinedAt: r.joinedAt })),
     }, { status: 200, headers: { 'Cache-Control': 'no-store' } });
-  } catch (err: any) {
-    console.error('Admin welcome GET error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 
@@ -198,8 +198,7 @@ export async function POST(request: NextRequest) {
         + (recipients.length > batch.length
           ? ` ${recipients.length - batch.length} more matched — send again to continue.` : ''),
     }, { status: 201 });
-  } catch (err: any) {
-    console.error('Admin welcome POST error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

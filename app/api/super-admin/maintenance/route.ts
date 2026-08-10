@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getMaintenanceMode, setSetting, type MaintenanceMode } from '@/lib/app-settings';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 🛠 MAINTENANCE MODE — ADMIN
@@ -18,13 +19,12 @@ function parseWhen(value: unknown, field: string): string | null {
   return d.toISOString();
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const data = await getMaintenanceMode();
     return NextResponse.json({ success: true, data }, { status: 200 });
-  } catch (err: any) {
-    console.error('Maintenance GET error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getDefaultSignupTier, setSetting } from '@/lib/app-settings';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // PLATFORM SETTINGS — ADMIN
@@ -11,13 +12,12 @@ import { supabaseAdminEngine } from '@/lib/supabase-server';
 // Admin-only via the /api/super-admin/* gate in middleware.ts.
 // =====================================================================================
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const defaultSignupTier = await getDefaultSignupTier();
     return NextResponse.json({ success: true, data: { defaultSignupTier } }, { status: 200 });
-  } catch (err: any) {
-    console.error('Settings GET error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 
@@ -47,8 +47,7 @@ export async function PATCH(request: NextRequest) {
 
     await setSetting('default_signup_tier', { tierId });
     return NextResponse.json({ success: true, data: { defaultSignupTier: { tierId } } }, { status: 200 });
-  } catch (err: any) {
-    console.error('Settings PATCH error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

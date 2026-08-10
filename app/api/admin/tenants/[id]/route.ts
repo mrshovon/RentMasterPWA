@@ -6,6 +6,7 @@ import { generatePasscode, hashPasscode } from '../../../../../lib/passcode';
 import { encryptField, hasEncryptionKey } from '../../../../../lib/field-crypto';
 import { shapeTenantForOwner } from '../../../../../lib/tenants';
 import { validatePhone } from '../../../../../lib/validate';
+import { apiError } from '@/lib/api-response';
 
 // ==============================================================================
 // 🚀 TENANT MUTATOR: edit tenant details / revise rent. A rent change is journaled
@@ -151,8 +152,7 @@ export async function PATCH(
       .single();
 
     if (updateError) {
-      console.error('Supabase Tenant Update Error:', updateError);
-      return NextResponse.json({ error: updateError.message }, { status: 500 });
+      return apiError(request, updateError);
     }
 
     // 3. Journal a rent revision when the monthly rent actually changed.
@@ -198,8 +198,7 @@ export async function PATCH(
     // freshly saved NID kept reading as blank until a page reload.
     return NextResponse.json({ success: true, data: shapeTenantForOwner(updated) }, { status: 200 });
 
-  } catch (runtimeExceptionCatch: any) {
-    console.error('Fatal Pipeline Execution Tenant PATCH Route Crash:', runtimeExceptionCatch);
-    return NextResponse.json({ error: runtimeExceptionCatch.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (runtimeExceptionCatch) {
+    return apiError(request, runtimeExceptionCatch);
   }
 }

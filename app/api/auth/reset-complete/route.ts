@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseClient } from '@/lib/supabase-server';
-import { logPasswordReset, clientIpFrom } from '@/lib/password-reset-log';
+import { logPasswordReset, notifyPasswordChanged, clientIpFrom } from '@/lib/password-reset-log';
 
 // =====================================================================================
 // 🔐 FORGOT PASSWORD — owner self-service, step 2: audit log (public route)
@@ -34,13 +34,17 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'Invalid or expired session.' }, { status: 401, headers: cors });
     }
 
+    const ip = clientIpFrom(request.headers);
     await logPasswordReset({
       ownerId: data.user.id,
       ownerEmail: data.user.email || null,
       resetBy: null, // self-service — the owner acted, not an admin
       method: 'self_service_email',
-      ip: clientIpFrom(request.headers),
+      ip,
     });
+    // Even though this path started with an email, the confirmation still matters: it is what
+    // tells someone whose inbox was compromised that the recovery link was actually used.
+    void notifyPasswordChanged({ ownerId: data.user.id, ownerEmail: data.user.email || null, ip });
 
     return NextResponse.json({ success: true }, { status: 200, headers: cors });
   } catch (err: any) {

@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../lib/supabase-server';
 import { assertOwnerCanWrite } from '../../../../lib/subscription';
 import crypto from 'crypto';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 🚀 STORAGE UPLOAD ENGINE: accepts a multipart image and pushes it into the public
@@ -66,8 +67,7 @@ export async function POST(request: NextRequest) {
       .upload(objectPath, arrayBuffer, { contentType: blob.type, upsert: false });
 
     if (uploadError) {
-      console.error('Supabase Storage Upload Failure:', uploadError);
-      return NextResponse.json({ error: uploadError.message }, { status: 500 });
+      return apiError(request, uploadError);
     }
 
     const { data: publicUrlData } = supabaseAdminEngine
@@ -77,8 +77,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ success: true, url: publicUrlData.publicUrl, path: objectPath }, { status: 201 });
 
-  } catch (runtimeExceptionCatch: any) {
-    console.error('Fatal Pipeline Execution Storage Upload Route Crash:', runtimeExceptionCatch);
-    return NextResponse.json({ error: runtimeExceptionCatch.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (runtimeExceptionCatch) {
+    return apiError(request, runtimeExceptionCatch);
   }
 }

@@ -4,6 +4,7 @@ import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { assertOwnerCanWrite } from '@/lib/subscription';
 import { ownerId, recalcLedger } from '@/lib/billing';
 import { reverseAutoTransaction } from '@/lib/accounts';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 🧾 RENT PAYMENT (INSTALLMENT) — DELETE (OWNER)
@@ -56,8 +57,7 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
     const ledger = await recalcLedger(existing.ledger_id);
 
     return NextResponse.json({ success: true, message: 'Payment deleted.', ledger }, { status: 200 });
-  } catch (err: any) {
-    console.error('[billing/payments/:id] DELETE error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

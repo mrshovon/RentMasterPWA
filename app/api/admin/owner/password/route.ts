@@ -2,7 +2,8 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
-import { logPasswordReset, clientIpFrom } from '@/lib/password-reset-log';
+import { logPasswordReset, notifyPasswordChanged, clientIpFrom } from '@/lib/password-reset-log';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 🔐 OWNER CHANGE PASSWORD — in-app, while logged in (owner self-service)
@@ -61,20 +62,23 @@ export async function POST(request: NextRequest) {
     // Apply the new password with the service role.
     const { error: updErr } = await supabaseAdminEngine.auth.admin.updateUserById(ownerId, { password: newPassword });
     if (updErr) {
-      return NextResponse.json({ error: updErr.message }, { status: 500 });
+      return apiError(request, updErr);
     }
 
+    const ip = clientIpFrom(request.headers);
     await logPasswordReset({
       ownerId,
       ownerEmail: email,
       resetBy: ownerId, // the owner acted on their own account
       method: 'self_change',
-      ip: clientIpFrom(request.headers),
+      ip,
     });
+    // Not awaited: the password is already changed, so a slow mail provider must not hold the
+    // response open. Failures are recorded, never surfaced.
+    void notifyPasswordChanged({ ownerId, ownerEmail: email, ip });
 
     return NextResponse.json({ success: true, message: 'Password updated.' }, { status: 200 });
-  } catch (err: any) {
-    console.error('Owner change-password crash:', err);
-    return NextResponse.json({ error: err.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

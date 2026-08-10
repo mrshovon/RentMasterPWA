@@ -36,6 +36,62 @@ export async function logPasswordReset(input: LogPasswordResetInput): Promise<vo
   }
 }
 
+/**
+ * Tell the owner their password changed.
+ *
+ * Lives next to `logPasswordReset` because it has exactly the same three call sites — the admin
+ * reset, the email recovery flow, and the self-change in Settings — and the same rule: it must
+ * never break the thing it is reporting. By the time this runs the password has ALREADY changed,
+ * so throwing here would report a failure for an operation that succeeded.
+ *
+ * Kept as a separate call rather than folded into `logPasswordReset` so that "write an audit row"
+ * and "email the user" stay visibly distinct at each site; a function named `log…` that silently
+ * sends mail is the kind of thing nobody finds until it sends the wrong mail.
+ *
+ * This is the security notice that matters most in the whole app: it is how someone finds out
+ * their account was taken over.
+ */
+export async function notifyPasswordChanged(input: {
+  ownerId: string;
+  ownerEmail?: string | null;
+  byAdmin?: boolean;
+  ip?: string | null;
+}): Promise<void> {
+  try {
+    // Dynamic imports so this module stays usable from anywhere without dragging the mail stack
+    // (and its settings lookup) into every caller that only wants the audit row.
+    const [{ sendEmail }, { passwordChanged }] = await Promise.all([
+      import('./email/brevo'),
+      import('./email/templates'),
+    ]);
+
+    let email = input.ownerEmail ?? null;
+    let name = '';
+    try {
+      const { data } = await supabaseAdminEngine.auth.admin.getUserById(input.ownerId);
+      email = email || data?.user?.email || null;
+      name = (data?.user?.user_metadata as any)?.name || '';
+    } catch {
+      /* fall back to whatever the caller passed */
+    }
+    if (!email) return;
+
+    const at = new Date().toLocaleString('en-GB', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+      timeZone: 'Asia/Dhaka',
+    });
+
+    await sendEmail({
+      to: email,
+      toName: name || null,
+      ...passwordChanged({ name, at, ip: input.ip ?? null, byAdmin: !!input.byAdmin }),
+    });
+  } catch (err) {
+    console.error('[password-reset-log] change notification failed (non-fatal):', err);
+  }
+}
+
 // Best-effort client IP from the standard proxy headers (matches middleware's approach:
 // x-real-ip is edge-set and un-spoofable on Vercel; fall back to the first x-forwarded-for hop).
 export function clientIpFrom(headers: Headers): string | null {

@@ -1,7 +1,10 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { supabaseClient } from '@/lib/supabase-server';
+import { supabaseClient, supabaseAdminEngine } from '@/lib/supabase-server';
 import { validateEmail } from '@/lib/validate';
+import { resolveResetUrl } from '@/lib/public-url';
+import { isBrevoReady, sendEmail } from '@/lib/email/brevo';
+import { passwordReset } from '@/lib/email/templates';
 
 // =====================================================================================
 // 🔐 FORGOT PASSWORD — owner self-service, step 1 (public route, not behind middleware auth)
@@ -40,32 +43,9 @@ function record(key: string) {
   else rec.count += 1;
 }
 
-// Where the recovery link should send the owner.
-//
-// PUBLIC_APP_URL comes first and is the one to set in production. This used to resolve off
-// ALLOWED_ORIGINS alone, which made the reset link depend on the ORDERING of the CORS list —
-// and, when that variable was unset (as it was), silently produced
-// "http://localhost:3001/reset-password" in every production email. The mail arrived, the link
-// went nowhere, and nothing anywhere logged a problem.
-//
-// The Origin fallback still exists so a preview deployment resets against itself, but it is
-// only trusted when the origin is on the allow-list — an attacker who could steer this would be
-// having recovery links for other people's accounts mailed to a host of their choosing.
-//
-// ⚠️ Whatever this resolves to must ALSO be listed under Supabase → Authentication → URL
-// Configuration → Redirect URLs. Supabase silently ignores a redirectTo that isn't on that list
-// and substitutes the Site URL, which looks identical from here.
-function resolveResetUrl(request: NextRequest): string {
-  const allowed = (process.env.ALLOWED_ORIGINS || '')
-    .split(',').map((s) => s.trim()).filter(Boolean);
-  const origin = request.headers.get('origin');
-  const base =
-    process.env.PUBLIC_APP_URL ||
-    (origin && allowed.includes(origin) && origin) ||
-    allowed[0] ||
-    'http://localhost:3001';
-  return `${base.replace(/\/$/, '')}/reset-password`;
-}
+// How long Supabase's recovery links live, for the wording in our own email. Supabase's default
+// is 1 hour; it is not readable from here, so this is stated rather than derived.
+const RECOVERY_TTL_MINUTES = 60;
 
 // Generic acknowledgement — identical whether or not the email exists.
 const ack = () =>
@@ -73,6 +53,36 @@ const ack = () =>
     { success: true, message: 'If an account exists for that email, a reset link is on its way.' },
     { status: 200, headers: cors },
   );
+
+/**
+ * Mint the recovery link ourselves and mail it through Brevo.
+ *
+ * `generateLink` does NOT send anything — it returns the same one-time action link Supabase would
+ * have emailed, which is what lets us wrap it in our own template. It requires the service role,
+ * and it throws for an address with no account, so everything here is swallowed: the caller must
+ * behave identically for a real and an unknown address.
+ */
+async function sendViaBrevo(email: string, redirectTo: string): Promise<void> {
+  try {
+    const { data, error } = await supabaseAdminEngine.auth.admin.generateLink({
+      type: 'recovery',
+      email,
+      options: { redirectTo },
+    });
+    if (error || !data?.properties?.action_link) return; // no such account — indistinguishable
+
+    const name = (data.user?.user_metadata as any)?.name || '';
+    const body = passwordReset({
+      name,
+      actionLink: data.properties.action_link,
+      expiresMinutes: RECOVERY_TTL_MINUTES,
+    });
+
+    await sendEmail({ to: email, toName: name || null, ...body });
+  } catch {
+    /* A mail failure is already recorded by lib/email/brevo.ts; the caller must stay generic. */
+  }
+}
 
 export async function OPTIONS() {
   return NextResponse.json({}, { headers: cors });
@@ -95,9 +105,21 @@ export async function POST(request: NextRequest) {
     // gets a real email containing a dead link, and this endpoint returns its usual 200.
     console.log('[forgot-password] recovery link will point at', redirectTo);
 
-    // Fire the recovery email. We deliberately ignore the result: a non-existent email must
-    // look identical to a real one from the outside.
-    await supabaseClient.auth.resetPasswordForEmail(key, { redirectTo });
+    // Two senders, one behaviour.
+    //
+    // When the admin has connected Brevo we mint the recovery link OURSELVES with
+    // generateLink() and send it through our own bilingual template — which is the only way the
+    // wording, the sender name and the Bangla half are ours rather than whatever is configured in
+    // the Supabase dashboard. Otherwise we fall back to Supabase's built-in mailer, exactly as
+    // before, so turning Brevo off never breaks password recovery.
+    //
+    // Either way the result is ignored and the response is identical: generateLink() errors for
+    // an address with no account, and that difference must never be observable from outside.
+    if (await isBrevoReady()) {
+      await sendViaBrevo(key, redirectTo);
+    } else {
+      await supabaseClient.auth.resetPasswordForEmail(key, { redirectTo });
+    }
 
     return ack();
   } catch (err: any) {

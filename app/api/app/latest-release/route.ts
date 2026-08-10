@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 📦 LATEST APP RELEASE (public)
@@ -23,7 +24,7 @@ const UPSTREAM = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/re
 // rate-limited into permanent silence is not.
 const REVALIDATE_SECONDS = 600;
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const res = await fetch(UPSTREAM, {
       headers: {
@@ -61,8 +62,7 @@ export async function GET() {
         headers: { 'Cache-Control': `public, max-age=60, s-maxage=${REVALIDATE_SECONDS}` },
       }
     );
-  } catch (err: any) {
-    console.error('[latest-release] error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

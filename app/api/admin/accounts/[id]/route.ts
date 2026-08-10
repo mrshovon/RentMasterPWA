@@ -4,6 +4,7 @@ import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { assertOwnerCanWrite } from '@/lib/subscription';
 import { assertFeature } from '@/lib/features';
 import { ownerId, ACCOUNT_SELECT, accountFieldsFrom, ownsAccount, setDefaultAccount } from '@/lib/accounts';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 💰 ACCOUNT — SINGLE RECORD (OWNER)
@@ -36,9 +37,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (!row) return notFound();
 
     return NextResponse.json({ success: true, data: row }, { status: 200 });
-  } catch (err: any) {
-    console.error('[accounts/:id] GET error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 
@@ -92,9 +92,8 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     if (readError) throw readError;
 
     return NextResponse.json({ success: true, data: row }, { status: 200 });
-  } catch (err: any) {
-    console.error('[accounts/:id] PATCH error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 
@@ -124,8 +123,7 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
     if (error) throw error;
 
     return NextResponse.json({ success: true, message: 'Account removed.' }, { status: 200 });
-  } catch (err: any) {
-    console.error('[accounts/:id] DELETE error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

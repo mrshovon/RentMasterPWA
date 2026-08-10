@@ -1,8 +1,9 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
-import { logPasswordReset, clientIpFrom } from '@/lib/password-reset-log';
+import { logPasswordReset, notifyPasswordChanged, clientIpFrom } from '@/lib/password-reset-log';
 import { getPresenceFor } from '@/lib/presence';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 🛡️ ADMIN — SINGLE OWNER
@@ -11,7 +12,7 @@ import { getPresenceFor } from '@/lib/presence';
 //           / cancel subscription
 // DELETE -> remove the account
 // =====================================================================================
-export async function GET(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
     const { data: authRes, error } = await supabaseAdminEngine.auth.admin.getUserById(id);
@@ -104,9 +105,8 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
         tenantCount,
       },
     }, { status: 200 });
-  } catch (err: any) {
-    console.error('Admin Owner GET error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 
@@ -175,13 +175,17 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       const { error } = await supabaseAdminEngine.auth.admin.updateUserById(id, { password });
       if (error) throw error;
       // Audit trail (admin-only view). Best-effort — never fail the reset over a log write.
+      const ip = clientIpFrom(request.headers);
       await logPasswordReset({
         ownerId: id,
         ownerEmail: cur?.user?.email || null,
         resetBy: request.headers.get('x-rentmaster-uid'),
         method: 'admin_reset',
-        ip: clientIpFrom(request.headers),
+        ip,
       });
+      // The owner did not do this and has no other way of knowing it happened — the admin still
+      // has to relay the new password out-of-band, but the account holder gets told regardless.
+      void notifyPasswordChanged({ ownerId: id, ownerEmail: cur?.user?.email || null, byAdmin: true, ip });
       return NextResponse.json({ success: true, message: 'Password reset successfully.' });
     }
 
@@ -197,9 +201,8 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     }).eq('id', id);
 
     return NextResponse.json({ success: true, message: 'Owner details updated.' });
-  } catch (err: any) {
-    console.error('Admin Owner PATCH error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 
@@ -374,8 +377,7 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
       message: 'Owner account deleted.',
       removed: { properties: propertyIds.length, tenants: tenantIds.length, invoices: ledgerIds.length },
     });
-  } catch (err: any) {
-    console.error('Admin Owner DELETE error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

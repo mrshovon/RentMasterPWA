@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // PAYMENT SUBMISSIONS — ADMIN QUEUE
@@ -52,8 +53,7 @@ export async function GET(request: NextRequest) {
     }));
 
     return NextResponse.json({ success: true, count: enriched.length, data: enriched }, { status: 200 });
-  } catch (err: any) {
-    console.error('Admin Payments GET error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

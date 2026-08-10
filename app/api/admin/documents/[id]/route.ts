@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../../lib/supabase-server';
 import { assertOwnerCanWrite } from '../../../../../lib/subscription';
+import { apiError } from '@/lib/api-response';
 
 // ==============================================================================
 // 🚀 DOCUMENT REMOVAL: owner deletes a tenant document record.
@@ -28,13 +29,11 @@ export async function DELETE(
       .eq('id', id);
 
     if (error) {
-      console.error('Documents Delete Error:', error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return apiError(request, error);
     }
 
     return NextResponse.json({ success: true }, { status: 200 });
-  } catch (e: any) {
-    console.error('Documents DELETE Route Crash:', e);
-    return NextResponse.json({ error: e.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (e) {
+    return apiError(request, e);
   }
 }

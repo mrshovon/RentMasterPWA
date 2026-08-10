@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getPaymentConfig } from '@/lib/app-settings';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // PAYMENT SETUP — OWNER-FACING READ
@@ -16,8 +17,7 @@ export async function GET(request: NextRequest) {
 
     const config = await getPaymentConfig();
     return NextResponse.json({ success: true, data: config }, { status: 200 });
-  } catch (err: any) {
-    console.error('Owner payment-config GET error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

@@ -4,6 +4,7 @@ import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { sendPushToRole } from '@/lib/push-send';
 import { validateEmail, validatePhone } from '@/lib/validate';
 import crypto from 'crypto';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // CONTACT MESSAGES — OWNER SIDE
@@ -63,8 +64,7 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (insertError) {
-      console.error('[contact-messages] insert failed:', insertError);
-      return NextResponse.json({ error: insertError.message }, { status: 500 });
+      return apiError(request, insertError);
     }
 
     // Buzz the system admins. Fire-and-forget: a push failure must never fail the enquiry.
@@ -80,8 +80,7 @@ export async function POST(request: NextRequest) {
     }
 
     return NextResponse.json({ success: true, data: row }, { status: 201 });
-  } catch (err: any) {
-    console.error('[contact-messages] POST crash:', err);
-    return NextResponse.json({ error: err.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

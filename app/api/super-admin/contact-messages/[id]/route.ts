@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // CONTACT MESSAGES — ADMIN STATE MACHINE
@@ -38,16 +39,14 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       .single();
 
     if (error) {
-      console.error('Admin Contact Message PATCH error:', error);
-      return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+      return apiError(request, error);
     }
     if (!row) {
       return NextResponse.json({ success: false, error: 'Message not found.' }, { status: 404 });
     }
 
     return NextResponse.json({ success: true, data: row }, { status: 200 });
-  } catch (err: any) {
-    console.error('Admin Contact Message PATCH crash:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

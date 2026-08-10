@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { sendPushToUsers } from '@/lib/push-send';
 import { activateSubscription } from '@/lib/payments/activate';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // PAYMENT SUBMISSIONS — ADMIN DECISION
@@ -81,8 +82,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       .single();
 
     if (updateError) {
-      console.error('Admin Payment PATCH error:', updateError);
-      return NextResponse.json({ success: false, error: updateError.message }, { status: 500 });
+      return apiError(request, updateError);
     }
 
     // Tell the owner the outcome. Fire-and-forget: never fail the response.
@@ -98,8 +98,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     }
 
     return NextResponse.json({ success: true, data: row }, { status: 200 });
-  } catch (err: any) {
-    console.error('Admin Payment PATCH crash:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

@@ -7,6 +7,7 @@ import {
   ownerId, TXN_SELECT, TXN_DIRECTIONS, txnFieldsFrom, ownsAccount, resolveOwnerPropertyId,
 } from '@/lib/accounts';
 import crypto from 'crypto';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 💵 ACCOUNT TRANSACTIONS — OWNER (income & expense)
@@ -39,9 +40,8 @@ export async function GET(request: NextRequest) {
     if (error) throw error;
 
     return NextResponse.json({ success: true, count: data?.length || 0, data: data || [] }, { status: 200 });
-  } catch (err: any) {
-    console.error('[accounts/transactions] GET error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 
@@ -101,13 +101,11 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (insertError) {
-      console.error('[accounts/transactions] insert failed:', insertError);
-      return NextResponse.json({ success: false, error: insertError.message }, { status: 500 });
+      return apiError(request, insertError);
     }
 
     return NextResponse.json({ success: true, data: row }, { status: 201 });
-  } catch (err: any) {
-    console.error('[accounts/transactions] POST crash:', err);
-    return NextResponse.json({ success: false, error: err.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

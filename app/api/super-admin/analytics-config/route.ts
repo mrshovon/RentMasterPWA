@@ -4,6 +4,7 @@ import {
   getAnalyticsConfig, setSetting, DEFAULT_ANALYTICS_CONFIG,
   isMeasurementId, isContainerId, AnalyticsConfig,
 } from '@/lib/app-settings';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 🛡️ ADMIN — GOOGLE ANALYTICS CONFIG
@@ -17,15 +18,14 @@ import {
 
 export const dynamic = 'force-dynamic';
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const config = await getAnalyticsConfig();
     return NextResponse.json({ success: true, data: config }, {
       status: 200, headers: { 'Cache-Control': 'no-store' },
     });
-  } catch (err: any) {
-    console.error('Analytics config GET error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 
@@ -68,8 +68,7 @@ export async function PUT(request: NextRequest) {
     await setSetting('analytics_config', config);
 
     return NextResponse.json({ success: true, data: config, message: 'Analytics settings saved.' }, { status: 200 });
-  } catch (err: any) {
-    console.error('Analytics config PUT error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

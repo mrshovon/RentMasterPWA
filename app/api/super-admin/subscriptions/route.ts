@@ -1,13 +1,14 @@
 import { NextResponse } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { computeExpiry } from '@/lib/payments/activate';
+import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
 // 🛡️ ADMIN — SUBSCRIPTION TIERS + PLAN ASSIGNMENT
 // GET  -> list available subscription tiers
 // POST -> assign/override a plan for an owner (writes an active subscription_history row)
 // =====================================================================================
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const { data, error } = await supabaseAdminEngine
       .from('subscription_tiers')
@@ -15,9 +16,8 @@ export async function GET() {
       .order('price', { ascending: true });
     if (error) throw error;
     return NextResponse.json({ success: true, count: data?.length || 0, data }, { status: 200 });
-  } catch (err: any) {
-    console.error('Admin Tiers GET error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
 
@@ -60,8 +60,7 @@ export async function POST(request: Request) {
 
     if (error) throw error;
     return NextResponse.json({ success: true, message: 'Plan assigned.', data }, { status: 201 });
-  } catch (err: any) {
-    console.error('Admin Subscription assign error:', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }

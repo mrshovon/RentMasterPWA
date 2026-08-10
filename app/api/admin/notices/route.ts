@@ -4,6 +4,7 @@ import { supabaseAdminEngine } from '../../../../lib/supabase-server';
 import { assertOwnerCanWrite } from '../../../../lib/subscription';
 import { sendPushToUsers, sendPushToRole } from '../../../../lib/push-send';
 import crypto from 'crypto';
+import { apiError } from '@/lib/api-response';
 
 // Audiences a notice can address. See ADD_NOTICE_TARGETS.sql for the matching DB constraint.
 const VALID_SCOPES = [
@@ -85,8 +86,7 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (databaseInsertException) {
-      console.error('Supabase Notice Injection Database Failure Error:', databaseInsertException);
-      return NextResponse.json({ error: databaseInsertException.message }, { status: 500 });
+      return apiError(request, databaseInsertException);
     }
 
     // Fire-and-forget Web Push to the notice's audience (never block/fail the response on push).
@@ -126,9 +126,8 @@ export async function POST(request: NextRequest) {
       data: createdNotice
     }, { status: 201 });
 
-  } catch (runtimeExceptionCatch: any) {
-    console.error('Fatal Pipeline Execution Notices Core POST Route Crash:', runtimeExceptionCatch);
-    return NextResponse.json({ error: runtimeExceptionCatch.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (runtimeExceptionCatch) {
+    return apiError(request, runtimeExceptionCatch);
   }
 }
 
@@ -280,8 +279,7 @@ export async function GET(request: NextRequest) {
     }
 
     if (fetchDatabaseException) {
-      console.error('Supabase Notice Framework Stream Failure Error Exception:', fetchDatabaseException);
-      return NextResponse.json({ error: fetchDatabaseException.message }, { status: 500 });
+      return apiError(request, fetchDatabaseException);
     }
 
     return NextResponse.json({
@@ -296,8 +294,7 @@ export async function GET(request: NextRequest) {
       data: processedNotices
     }, { status: 200 });
 
-  } catch (runtimeExceptionCatch: any) {
-    console.error('Fatal Pipeline Execution Notices Core GET Route Crash:', runtimeExceptionCatch);
-    return NextResponse.json({ error: runtimeExceptionCatch.message || 'Fatal Server Logic Exception.' }, { status: 500 });
+  } catch (runtimeExceptionCatch) {
+    return apiError(request, runtimeExceptionCatch);
   }
 }

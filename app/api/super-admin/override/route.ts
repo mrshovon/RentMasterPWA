@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { computeExpiry } from '@/lib/payments/activate';
+import { apiError } from '@/lib/api-response';
 
 export async function POST(request: Request) {
   try {
@@ -36,7 +37,7 @@ export async function POST(request: Request) {
     if (historyError) throw historyError;
 
     return NextResponse.json({ success: true, msg: "Manual plan override injected successfully." });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (err) {
+    return apiError(request, err);
   }
 }
