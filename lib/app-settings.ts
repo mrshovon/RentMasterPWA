@@ -66,6 +66,38 @@ export const getMaintenanceMode = () =>
 export const getDefaultSignupTier = () => getSetting<{ tierId: string }>('default_signup_tier', { tierId: '' });
 
 // -------------------------------------------------------------------------------------
+// ANNOUNCEMENT — an admin-written popup shown to owners and tenants when they open the app.
+// One announcement at a time, with a Show/Hide switch; the admin never sees it themselves (they
+// have a Preview button instead), which is also what keeps them able to switch it back off.
+//
+// `title` and `body` are both optional: an announcement with only an image is a poster, which is
+// the point of the image-only mode. `enabled` with all three empty is refused by the write route.
+//
+// `imageUrl` is a public URL in the existing RentMasterProDocs bucket, uploaded through
+// /api/admin/uploads with folder 'announcements' — no new bucket, no base64 in this table.
+//
+// `updatedAt` is stamped server-side on every save and acts as the version id: the client uses it
+// to tell "the same announcement I already saw" from "the admin changed it".
+// -------------------------------------------------------------------------------------
+export interface Announcement {
+  enabled: boolean;
+  title: string;
+  body: string;
+  imageUrl: string | null;
+  updatedAt: string;   // ISO 8601, or '' when never saved
+}
+
+export const DEFAULT_ANNOUNCEMENT: Announcement = {
+  enabled: false,
+  title: '',
+  body: '',
+  imageUrl: null,
+  updatedAt: '',
+};
+
+export const getAnnouncement = () => getSetting<Announcement>('announcement', DEFAULT_ANNOUNCEMENT);
+
+// -------------------------------------------------------------------------------------
 // ANALYTICS — admin-managed Google Analytics / Tag Manager wiring, so the IDs can be
 // changed from the admin panel without a redeploy.
 //

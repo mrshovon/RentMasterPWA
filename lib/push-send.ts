@@ -24,14 +24,33 @@ function ensureConfigured(): boolean {
 /** Whether Web Push can send at all. Surfaced by the diagnostics route. */
 export const isWebPushConfigured = (): boolean => !!(VAPID_PUBLIC && VAPID_PRIVATE);
 
+/**
+ * Which sound a recipient's notifications make. Set per account in Settings → App & notifications
+ * and stored in `notification_prefs` (see ADD_NOTIFICATION_PREFS.sql).
+ *
+ * Callers do NOT set this — `deliver()` fills it in per recipient. It is on the payload rather than
+ * a separate argument because both transports need it: FCM turns it into an Android channel id
+ * (fcm-send.ts) and Web Push carries it to the service worker, which uses it for `silent` and to
+ * ask an open page to play the brand tone (app/sw.ts in the UI repo).
+ */
+export type PushSound = 'custom' | 'default' | 'off';
+export const DEFAULT_PUSH_SOUND: PushSound = 'custom';
+
 export interface PushPayload {
   title: string;
   body: string;
   url?: string;   // where notificationclick should navigate
   tag?: string;   // collapse key
+  sound?: PushSound;  // filled in per recipient by deliver(); callers leave it unset
 }
 
-interface TokenRow { token: string; p256dh: string | null; auth: string | null; device_type?: string | null; }
+interface TokenRow {
+  user_id: string;
+  token: string;
+  p256dh: string | null;
+  auth: string | null;
+  device_type?: string | null;
+}
 
 // ---------------------------------------------------------------------------
 // Diagnostics. Every send collects per-token outcomes so /api/notifications/test
@@ -70,20 +89,66 @@ function hostOf(token: string): string {
  */
 const isWebPushRow = (r: TokenRow): boolean => !!(r.p256dh && r.auth);
 
+/**
+ * Each recipient's chosen notification sound, keyed by the same id `device_tokens.user_id` uses
+ * (an owner auth uid or a tenant id). Anyone without a row keeps the shipped default.
+ *
+ * Wrapped so a missing table is survivable: this file is on the path of EVERY notification in the
+ * app, and a preference lookup must never be the reason a rent reminder fails to go out. Before
+ * ADD_NOTIFICATION_PREFS.sql is run, PostgREST answers PGRST205 and everyone simply gets 'custom'.
+ */
+async function loadSoundPrefs(rows: TokenRow[]): Promise<Map<string, PushSound>> {
+  const prefs = new Map<string, PushSound>();
+  const userIds = [...new Set(rows.map((r) => r.user_id).filter(Boolean))];
+  if (!userIds.length) return prefs;
+  try {
+    const { data, error } = await supabaseAdminEngine
+      .from('notification_prefs')
+      .select('user_id, sound')
+      .in('user_id', userIds);
+    if (error) throw error;
+    for (const row of data || []) {
+      if (row?.user_id && row?.sound) prefs.set(row.user_id, row.sound as PushSound);
+    }
+  } catch (err: any) {
+    console.warn('[push] could not read notification_prefs — defaulting everyone to the app tone:', err?.message || err);
+  }
+  return prefs;
+}
+
 // Split rows by transport and deliver to each. Web + FCM run in parallel; a failure in one
 // never blocks the other.
+//
+// Rows are first grouped by the recipient's sound preference, because that is a property of the
+// message on the wire (an Android channel id, a `silent` flag) and not something the transports can
+// decide for themselves. At most three groups exist, so this is at most three sends per transport.
 async function deliver(rows: TokenRow[], payload: PushPayload): Promise<PushReport> {
   const report: PushReport = { configured: isWebPushConfigured(), tokens: rows.length, attempts: [] };
   if (rows.length === 0) return report;
 
-  const webRows = rows.filter(isWebPushRow);
-  const nativeTokens = rows.filter((r) => !isWebPushRow(r)).map((r) => r.token);
+  const prefs = await loadSoundPrefs(rows);
+  const groups = new Map<PushSound, TokenRow[]>();
+  for (const row of rows) {
+    const sound = prefs.get(row.user_id) ?? DEFAULT_PUSH_SOUND;
+    const group = groups.get(sound);
+    if (group) group.push(row);
+    else groups.set(sound, [row]);
+  }
 
-  const [webAttempts, fcmAttempts] = await Promise.all([
-    deliverWeb(webRows, payload),
-    sendFcm(nativeTokens, payload),
-  ]);
-  report.attempts = [...webAttempts, ...fcmAttempts];
+  const batches = await Promise.all(
+    [...groups.entries()].map(async ([sound, groupRows]) => {
+      const groupPayload: PushPayload = { ...payload, sound };
+      const webRows = groupRows.filter(isWebPushRow);
+      const nativeTokens = groupRows.filter((r) => !isWebPushRow(r)).map((r) => r.token);
+      const [webAttempts, fcmAttempts] = await Promise.all([
+        deliverWeb(webRows, groupPayload),
+        sendFcm(nativeTokens, groupPayload),
+      ]);
+      return [...webAttempts, ...fcmAttempts];
+    }),
+  );
+
+  report.attempts = batches.flat();
   await recordFailures(report, payload);
   return report;
 }
@@ -161,7 +226,7 @@ async function deliverWeb(rows: TokenRow[], payload: PushPayload): Promise<PushA
 
 async function loadTokens(filter: (q: any) => any): Promise<TokenRow[]> {
   const { data } = await filter(
-    supabaseAdminEngine.from('device_tokens').select('token, p256dh, auth, device_type'),
+    supabaseAdminEngine.from('device_tokens').select('user_id, token, p256dh, auth, device_type'),
   );
   return (data as TokenRow[]) || [];
 }

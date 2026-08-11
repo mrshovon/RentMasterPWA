@@ -7,7 +7,28 @@
 import { initializeApp, getApps, cert, type App } from 'firebase-admin/app';
 import { getMessaging } from 'firebase-admin/messaging';
 import { supabaseAdminEngine } from './supabase-server';
-import type { PushPayload, PushAttempt } from './push-send';
+import type { PushPayload, PushAttempt, PushSound } from './push-send';
+
+/**
+ * The Android notification channel each sound preference maps to.
+ *
+ * ⚠️ Android FREEZES a channel's sound the moment the channel is created, and nothing — not an app
+ * update, not the server — can change it afterwards. That is why there is one channel per option
+ * instead of one channel whose sound we set per message, and why the ids carry a `_v1`: changing
+ * the brand tone later means adding `bari360_tone_v2`, never editing this entry.
+ *
+ * The channels themselves are created by the app on launch — see lib/native-push.ts in the UI repo.
+ * Keep the ids identical in both places or the notification lands on an auto-created channel with
+ * default settings.
+ *
+ * 'off' is a channel at IMPORTANCE_LOW rather than a `silent` flag, because FCM has no such flag:
+ * on Android 8+ the channel is the only thing that decides whether a notification makes a noise.
+ */
+const SOUND_CHANNELS: Record<PushSound, { channelId: string; sound?: string; defaultSound?: boolean }> = {
+  custom:  { channelId: 'bari360_tone_v1',    sound: 'bari360_tone' },
+  default: { channelId: 'bari360_default_v1', defaultSound: true },
+  off:     { channelId: 'bari360_silent_v1' },
+};
 
 /**
  * Web Push endpoints are http(s) URLs; FCM registration tokens are not.
@@ -69,6 +90,7 @@ export async function sendFcm(tokens: string[], payload: PushPayload): Promise<P
   const messaging = getMessaging(a);
   const invalid: string[] = [];
   const attempts: PushAttempt[] = [];
+  const channel = SOUND_CHANNELS[payload.sound || 'custom'] ?? SOUND_CHANNELS.custom;
 
   for (let i = 0; i < fcmTokens.length; i += FCM_MULTICAST_LIMIT) {
     const chunk = fcmTokens.slice(i, i + FCM_MULTICAST_LIMIT);
@@ -86,7 +108,10 @@ export async function sendFcm(tokens: string[], payload: PushPayload): Promise<P
             icon: 'ic_stat_notify',
             color: '#136aba',
             tag: payload.tag,
-            defaultSound: true,
+            // Sound comes from the channel (see SOUND_CHANNELS above). `sound` is still set for
+            // the custom tone as a pre-Oreo fallback; on Android 8+ it is ignored in favour of
+            // whatever the channel was created with.
+            ...channel,
           },
         },
       });
