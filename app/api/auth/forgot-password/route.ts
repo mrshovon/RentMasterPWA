@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseClient, supabaseAdminEngine } from '@/lib/supabase-server';
-import { validateEmail } from '@/lib/validate';
+import { validateEmail, isSystemLogin } from '@/lib/validate';
 import { resolveResetUrl } from '@/lib/public-url';
 import { isBrevoReady, sendEmail } from '@/lib/email/brevo';
 import { passwordReset } from '@/lib/email/templates';
@@ -94,6 +94,26 @@ export async function POST(request: NextRequest) {
     const parsed = validateEmail(email, { required: true });
     if (!parsed.ok) {
       return NextResponse.json({ success: false, error: parsed.error }, { status: 400, headers: cors });
+    }
+
+    // Building-tier accounts sign in with a system-issued identifier, not a mailbox, so there is
+    // nowhere for a link to go. Answered BEFORE the throttle and before any Supabase call.
+    //
+    // This deliberately breaks the generic-acknowledgement rule above, and that is correct: the
+    // ENTIRE domain is system-issued, so saying "these cannot self-reset" reveals nothing about
+    // whether this particular identifier exists. The enumeration defence protects real addresses
+    // and is untouched. Answering with the usual ack would be the worse outcome by far — it
+    // promises a link that will never arrive, to someone who would then wait for it.
+    if (isSystemLogin(parsed.value)) {
+      return NextResponse.json(
+        {
+          success: true,
+          code: 'SYSTEM_LOGIN',
+          message:
+            "Building accounts can't reset their own password. Ask your building administrator to set a new one for you.",
+        },
+        { status: 200, headers: cors },
+      );
     }
 
     const key = parsed.value; // validateEmail already trims and lowercases

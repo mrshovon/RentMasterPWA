@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { assertOwnerCanWrite } from '@/lib/subscription';
-import { validatePhone } from '@/lib/validate';
+import { validatePhone, flatToken } from '@/lib/validate';
 import { logPasswordReset, notifyPasswordChanged, clientIpFrom } from '@/lib/password-reset-log';
 import { apiError } from '@/lib/api-response';
 import {
@@ -22,6 +22,12 @@ import {
 //
 // Every handler re-checks that this owner is on THIS admin's roster, so a foreign owner id
 // reads as "not found" rather than being editable by whoever guessed it.
+//
+// THE LOGIN IDENTIFIER IS NEVER TOUCHED HERE, AND MUST NEVER BE. It is auth.users.email and it
+// is set exactly once, at creation. `house_no` and `flat_no` are the INPUTS it was built from —
+// kept for printing and for knowing which flat is which — and are never read back to regenerate
+// an address. Someone who moves from flat 3B to 4A keeps signing in as 12a-3b-456@bari360.com,
+// because changing how a person signs in is not something a label edit gets to do silently.
 // =====================================================================================
 
 export async function PATCH(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -85,7 +91,10 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     // written to both places the rest of the app reads them from.
     const rosterFields: Record<string, unknown> = {};
     if (body.unitLabel !== undefined) {
-      rosterFields.unit_label = String(body.unitLabel || '').trim().slice(0, 120) || null;
+      const unitLabel = String(body.unitLabel || '').trim().slice(0, 120);
+      rosterFields.unit_label = unitLabel || null;
+      // Kept in step with the label so the two never disagree about which flat this is.
+      rosterFields.flat_no = flatToken(unitLabel) || null;
     }
     if (body.defaultServiceCharge !== undefined) {
       const amount = Number(body.defaultServiceCharge);

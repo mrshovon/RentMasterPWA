@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getBrevoConfig, setSetting, DEFAULT_BREVO_CONFIG, type BrevoConfig } from '@/lib/app-settings';
 import { encryptField, decryptField, hasEncryptionKey } from '@/lib/field-crypto';
-import { validateEmail } from '@/lib/validate';
+import { validateEmail, isSystemLogin } from '@/lib/validate';
 import { sendEmail } from '@/lib/email/brevo';
 import { apiError } from '@/lib/api-response';
 
@@ -147,6 +147,19 @@ export async function POST(request: NextRequest) {
     const parsed = validateEmail(to, { required: true });
     if (!parsed.ok) {
       return NextResponse.json({ success: false, error: parsed.error }, { status: 400 });
+    }
+
+    // sendEmail() refuses this whole domain, so without the explicit check the admin would get
+    // "Brevo did not accept the message" and go hunting through the Logs tab for a rejection
+    // that was never sent — the worst possible diagnosis of a typo.
+    if (isSystemLogin(parsed.value)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'That is a system login identifier, not a real mailbox. Use a real address to test the connection.',
+        },
+        { status: 400 },
+      );
     }
 
     const ok = await sendEmail({

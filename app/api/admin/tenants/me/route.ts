@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../../lib/supabase-server';
 import { isTenantLoginBlocked, TENANT_BLOCKED_MESSAGE } from '../../../../../lib/tenant-access';
 import { apiError } from '@/lib/api-response';
+import { isSystemLogin } from '@/lib/validate';
 
 // =====================================================================================
 // 🚀 TENANT SELF-PROFILE ENGINE: returns the signed-in tenant's own record joined with
@@ -58,7 +59,10 @@ export async function GET(request: NextRequest) {
           owner = {
             name: pick(meta.name, meta.full_name),
             phone: pick(meta.phone, u.phone, propertyNode?.owner_phone),
-            email: pick(u.email),
+            // A system login identifier is an internal credential, not a way to reach the
+            // landlord. Handing one to a tenant would put it in a JSON response a third party
+            // reads, for no benefit — nothing renders it, and it is not a mailbox.
+            email: isSystemLogin(u.email) ? null : pick(u.email),
             signature_url: pick(meta.signature_url),
           };
         }

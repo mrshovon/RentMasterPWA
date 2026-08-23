@@ -43,6 +43,9 @@ export interface BuildingRow {
   building_no?: number;
   admin_id: string;
   name: string;
+  /** Street/holding number as a human writes it ("12/A"). Null on a building that predates
+   * system login identifiers, which is what keeps its owners on the typed-email path. */
+  house_no: string | null;
   address: string | null;
   city: string | null;
   letterhead_url: string | null;
@@ -63,10 +66,10 @@ export interface BuildingMembership {
 }
 
 export const BUILDING_SELECT =
-  'id, building_no, admin_id, name, address, city, letterhead_url, signatory_name, signatory_title, notes, is_active, created_at, updated_at';
+  'id, building_no, admin_id, name, house_no, address, city, letterhead_url, signatory_name, signatory_title, notes, is_active, created_at, updated_at';
 
 export const BUILDING_OWNER_SELECT =
-  'building_id, owner_id, unit_label, default_service_charge, joined_at, is_active, created_at, updated_at';
+  'building_id, owner_id, unit_label, flat_no, default_service_charge, joined_at, is_active, created_at, updated_at';
 
 export function isBuildingAdmin(role: string | null | undefined): boolean {
   return role === BUILDING_ADMIN_ROLE;
@@ -251,6 +254,7 @@ export function buildingFieldsFrom(body: Record<string, unknown>): Record<string
     if (!name) throw new BuildingFieldError('The building needs a name.');
     out.name = name.slice(0, 200);
   }
+  text('houseNo', 'house_no', 40);
   text('address', 'address', 500);
   text('city', 'city', 120);
   text('letterheadUrl', 'letterhead_url', 1000);
@@ -260,4 +264,30 @@ export function buildingFieldsFrom(body: Record<string, unknown>): Record<string
 
   if (Object.keys(out).length) out.updated_at = new Date().toISOString();
   return out;
+}
+
+// =====================================================================================
+// SYSTEM LOGIN IDENTIFIERS
+// =====================================================================================
+// Building-tier accounts get a generated login instead of an email address — see
+// SYSTEM_LOGIN_DOMAIN in lib/validate.ts for what one looks like and why.
+//
+// Two owners can legitimately arrive at the same identifier: co-owners of one flat sharing a
+// phone, or a flat whose previous owner was detached (the roster row goes, the auth user stays,
+// and the address is theirs forever). So a taken identifier is resolved by appending -2, -3 …
+// rather than refused, and the caller shows the admin whichever one was actually issued.
+
+/** How far the suffix walks before giving up. Ten owners on one flat is a data-entry problem. */
+export const LOGIN_ID_MAX_SUFFIX = 9;
+
+/**
+ * Whether a createUser() failure means "that address is taken".
+ *
+ * GoTrue reports this as a plain 422 with a prose message and no stable code, so matching the
+ * message is the only option available. Deliberately NOT a pre-check with listUsers(): that
+ * pages at 1000, and between the check and the insert someone else can take the address anyway.
+ * Letting the unique constraint answer is race-free.
+ */
+export function isDuplicateEmailError(err: { message?: string } | null | undefined): boolean {
+  return /already|exists|registered/i.test(err?.message || '');
 }

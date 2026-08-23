@@ -1,6 +1,7 @@
 import { getBrevoConfig, type BrevoConfig } from '../app-settings';
 import { decryptField } from '../field-crypto';
 import { logEvent, describeError } from '../logger';
+import { isSystemLogin } from '../validate';
 
 // =====================================================================================
 // ✉️ BREVO TRANSACTIONAL EMAIL
@@ -57,6 +58,16 @@ export async function isBrevoReady(): Promise<boolean> {
  * here means the message was queued, not that it arrived.
  */
 export async function sendEmail(input: SendEmailInput): Promise<boolean> {
+  // Building-tier accounts have a system-issued identifier, not a mailbox — see
+  // SYSTEM_LOGIN_DOMAIN in lib/validate.ts. Every sender goes through here (welcome mail,
+  // password-change notice, plan expiry, and whatever gets written next), so this is the one
+  // place the whole class has to be turned away.
+  //
+  // DELIBERATELY SILENT — no logEvent. The entire point is to keep bounce rows with
+  // source: 'email' out of app_logs and the admin Logs tab; logging every suppressed send
+  // would reproduce exactly the noise this exists to prevent.
+  if (isSystemLogin(input.to)) return false;
+
   const resolved = await resolveSender();
   if (!resolved) return false; // not configured / disabled — silence is the correct behaviour
 

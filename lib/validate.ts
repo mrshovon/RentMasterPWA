@@ -175,3 +175,128 @@ export function phoneLookupCandidates(raw: string | null | undefined): string[] 
   }
   return [...candidates];
 }
+
+// -----------------------------------------------------------------------------
+// System login identifiers (building tier)
+// -----------------------------------------------------------------------------
+
+// A building admin and the flat owners on their roster do not choose this app — they are
+// enrolled into it by whoever runs their building. Asking each of them for a working email
+// address is friction at the worst possible moment, and most will give one they never read.
+//
+// So those accounts get an identifier instead: a login string derived from where the person
+// actually lives.
+//
+//   building admin  12a-678@bari360.com      house + last 3 of mobile
+//   member owner    12a-3b-456@bari360.com   house + flat + last 3 of mobile
+//
+// IT IS STILL JUST THE EMAIL STRING. Login is one `signInWithPassword({ email, password })`
+// call shared by every non-tenant role, `auth.users.email` is already unique, and nothing in
+// the codebase rewrites it. So there is no new auth plumbing and no second source of truth —
+// the identifier is stored, matched and displayed as the address it already is.
+//
+// Everyone else is untouched: an owner who signs up on their own keeps a real email, and
+// tenants sign in with phone + passcode and have no address at all.
+
+/**
+ * ⚠️ NO HUMAN MAILBOX MAY EVER EXIST ON THIS DOMAIN. `sendEmail()` refuses to deliver here, so
+ * a real staff address on it would have its mail silently dropped with nothing in the logs.
+ */
+export const SYSTEM_LOGIN_DOMAIN = "bari360.com";
+
+/** Whether an address is a system-issued identifier rather than a mailbox someone reads. */
+export function isSystemLogin(raw: string | null | undefined): boolean {
+  return String(raw ?? "").trim().toLowerCase().endsWith("@" + SYSTEM_LOGIN_DOMAIN);
+}
+
+/** Bengali digits, so a house number typed in Bangla doesn't strip down to nothing. */
+const BN_DIGITS = "০১২৩৪৫৬৭৮৯";
+
+// "Flat 4B", "Apt. 4-B" and "#4B" are all the same flat. People write the unit word because the
+// field asks for a flat, and it carries no information once it is inside an identifier.
+//
+// The \b is load-bearing: without it "north" matches ^no and becomes "rth".
+const UNIT_WORD_RE = /^(flat|apt|apartment|unit|suite|house|holding|plot|no|number)\b[\s.#:-]*/;
+
+/**
+ * One component of an identifier, reduced to the characters that survive an email local part.
+ *
+ * Hyphens must die INSIDE a token, because the hyphen is what separates the components:
+ * "4-B" is one flat, not two. Returns "" when nothing usable is left.
+ */
+function loginToken(raw: string | null | undefined): string {
+  let value = String(raw ?? "").trim().toLowerCase();
+  value = value.replace(/[০-৯]/g, (d) => String(BN_DIGITS.indexOf(d)));
+  // Twice, so "flat no. 4b" loses both words. Not a loop — three prefixes is a typo, not intent.
+  value = value.replace(UNIT_WORD_RE, "").replace(UNIT_WORD_RE, "").replace(/^#+\s*/, "");
+  return value.replace(/[^a-z0-9]+/g, "").slice(0, 8);
+}
+
+/**
+ * The last 3 digits of a mobile number, taken from the CANONICAL form rather than what was
+ * typed. That one rule covers international numbers too: +1 555 123 4567 -> 567, the same way
+ * 01712345678 -> 678, with no branch. `validatePhone` guarantees at least 8 digits.
+ */
+function phoneTail(raw: string | null | undefined): ValidationResult {
+  const parsed = validatePhone(raw, { required: true });
+  if (!parsed.ok) return parsed;
+  return ok(parsed.value.replace(/\D/g, "").slice(-3));
+}
+
+/** Join the parts, add the domain, and prove the result is an address like any other. */
+function composeLoginId(parts: string[], suffix: number): ValidationResult {
+  const local = [...parts, suffix > 1 ? String(suffix) : ""].filter(Boolean).join("-");
+  // Back through the same gate every other address passes: guarantees lowercase and the 254 cap.
+  return validateEmail(`${local}@${SYSTEM_LOGIN_DOMAIN}`, { required: true });
+}
+
+/**
+ * The login for the person who runs a building: house number + last 3 digits of their mobile.
+ *
+ * `suffix` is only for resolving a collision — 1 means none, 2 appends "-2". Callers pass it
+ * when `createUser` reports the address is taken.
+ *
+ *   buildingAdminLoginId("12/A", "01712345678") -> 12a-678@bari360.com
+ */
+export function buildingAdminLoginId(
+  houseNo: string | null | undefined,
+  phone: string | null | undefined,
+  suffix = 1,
+): ValidationResult {
+  const house = loginToken(houseNo);
+  if (!house) return bad("The building needs a house number before logins can be generated.");
+
+  const tail = phoneTail(phone);
+  if (!tail.ok) return tail;
+
+  return composeLoginId([house, tail.value], suffix);
+}
+
+/**
+ * The login for a flat owner on a building's roster: the building's house number, their flat,
+ * and the last 3 digits of their mobile.
+ *
+ *   memberOwnerLoginId("12/A", "Flat 3B", "01998877456") -> 12a-3b-456@bari360.com
+ */
+export function memberOwnerLoginId(
+  houseNo: string | null | undefined,
+  flatNo: string | null | undefined,
+  phone: string | null | undefined,
+  suffix = 1,
+): ValidationResult {
+  const house = loginToken(houseNo);
+  if (!house) return bad("The building needs a house number before logins can be generated.");
+
+  const flat = loginToken(flatNo);
+  if (!flat) return bad("Enter the flat number — it becomes part of the owner's login.");
+
+  const tail = phoneTail(phone);
+  if (!tail.ok) return tail;
+
+  return composeLoginId([house, flat, tail.value], suffix);
+}
+
+/** The normalised flat token, stored beside the free-text label so the two never disagree. */
+export function flatToken(raw: string | null | undefined): string {
+  return loginToken(raw);
+}
