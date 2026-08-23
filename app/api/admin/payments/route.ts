@@ -3,8 +3,10 @@ import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { sendPushToRole } from '@/lib/push-send';
 import { DEFAULT_PROVIDER_ID } from '@/lib/payments/registry';
+import { encryptSubmissionFields, shapeSubmission, PaymentFieldError } from '@/lib/payments/submissions';
 import { validatePhone } from '@/lib/validate';
 import { resolveOwnerSubscription, tierVisibleToOwner, tierIsOneTime, ownerUsedTierIds } from '@/lib/subscription';
+import { buildingMembershipOf } from '@/lib/building';
 import crypto from 'crypto';
 import { apiError } from '@/lib/api-response';
 
@@ -37,7 +39,9 @@ export async function GET(request: NextRequest) {
       .order('created_at', { ascending: false });
     if (error) throw error;
 
-    return NextResponse.json({ success: true, count: data?.length || 0, data: data || [] }, { status: 200 });
+    const shaped = (data || []).map(shapeSubmission);
+
+    return NextResponse.json({ success: true, count: shaped.length, data: shaped }, { status: 200 });
   } catch (err) {
     return apiError(request, err);
   }
@@ -51,6 +55,21 @@ export async function POST(request: NextRequest) {
     }
     const uid = ownerId(request);
     if (!uid) return NextResponse.json({ error: 'Context matching identity missing.' }, { status: 400 });
+
+    // A flat owner under a Whole Building plan does not pay us — their building admin does.
+    // Refused here, not merely hidden in the UI, so a stray submission can never enter the
+    // admin's reconciliation queue for money nobody expected.
+    const membership = await buildingMembershipOf(uid);
+    if (membership) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Your plan is covered by ${membership.buildingName}. There is nothing to pay here — contact your building administrator.`,
+          code: 'BUILDING_MANAGED_PLAN',
+        },
+        { status: 403 }
+      );
+    }
 
     const body = await request.json();
     const { tierId, amount, senderMsisdn, txnId } = body;
@@ -133,8 +152,10 @@ export async function POST(request: NextRequest) {
           amount: amount != null && amount !== ''
             ? Number(amount)
             : Number(tier.price || 0) * (1 - Number(tier.discount_percent || 0) / 100),
-          sender_msisdn: parsedMsisdn.value,
-          txn_id: String(txnId).trim(),
+          // Encrypted at rest — the payer's number and the transaction id together tie a person
+          // to a financial transaction. Decrypted back for the owner and the admin queue by
+          // shapeSubmission(). See lib/payments/submissions.ts.
+          ...encryptSubmissionFields(parsedMsisdn.value, String(txnId).trim()),
           status: 'pending',
         },
       ])
@@ -145,11 +166,15 @@ export async function POST(request: NextRequest) {
       return apiError(request, insertError);
     }
 
+    // The stored columns are ciphertext now, so read the identifiers back from the shaped row
+    // rather than the raw one — otherwise the admin push would say "txn null".
+    const shaped = shapeSubmission(row);
+
     // Buzz the system admins. Fire-and-forget: a push failure must never fail the submission.
     try {
       await sendPushToRole('admin', {
         title: 'New payment to review',
-        body: `${tier.name} — ৳${Number(row.amount || 0)} (txn ${row.txn_id}).`,
+        body: `${tier.name} — ৳${Number(shaped.amount || 0)} (txn ${shaped.txn_id}).`,
         url: '/admin#payments',
         tag: `payment-${paymentId}`,
       });
@@ -157,8 +182,13 @@ export async function POST(request: NextRequest) {
       console.error('[payments] push dispatch failed (non-fatal):', pushErr);
     }
 
-    return NextResponse.json({ success: true, data: row }, { status: 201 });
+    return NextResponse.json({ success: true, data: shaped }, { status: 201 });
   } catch (err) {
+    // A missing encryption key is a server misconfiguration, but it is the owner who is standing
+    // there unable to pay — give them the reason rather than a generic 500 with a reference id.
+    if (err instanceof PaymentFieldError) {
+      return NextResponse.json({ success: false, error: err.message }, { status: 400 });
+    }
     return apiError(request, err);
   }
 }

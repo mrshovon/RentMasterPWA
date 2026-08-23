@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../lib/supabase-server';
-import { resolveOwnerSubscription, assertOwnerCanWrite, checkCreateLimit } from '../../../../lib/subscription';
+import { resolveOwnerSubscription, assertOwnerCanWrite, checkCreateLimit, PLAN_GOVERNED_ROLES } from '../../../../lib/subscription';
 import { apiError } from '@/lib/api-response';
 
 // Generates a human-readable unit code like "UNIT-1234", verifying it isn't
@@ -73,7 +73,11 @@ export async function POST(request: NextRequest) {
     const guard = await assertOwnerCanWrite(role, ownerId);
     if (!guard.ok) return NextResponse.json(guard.body, { status: guard.status });
 
-    if (role === 'owner') {
+    // PLAN_GOVERNED_ROLES rather than a bare 'owner' check: a building admin is gated on their own
+    // Whole Building plan exactly like an owner is. That tier is unlimited, so this changes nothing
+    // in the normal case — it closes the hole where a MISCONFIGURED building admin (no plan row,
+    // so resolving to the free baseline) would have skipped the limit check entirely.
+    if (PLAN_GOVERNED_ROLES.includes(role || '')) {
       const sub = await resolveOwnerSubscription(ownerId);
       const limitCheck = await checkCreateLimit('property', ownerId, sub);
       if (!limitCheck.allowed) {

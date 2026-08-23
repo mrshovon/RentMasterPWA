@@ -8,7 +8,13 @@ import { supabaseAdminEngine } from '@/lib/supabase-server';
 export async function POST(request: Request) {
   try {
     const userId = request.headers.get('x-rentmaster-uid') || request.headers.get('x-rentmaster-tenant-id');
-    const role = request.headers.get('x-rentmaster-role') || null;
+
+    // device_tokens.role is what sendPushToRole() filters on with a plain .eq(), so a role it
+    // does not know about is not an error — it is a device that silently receives nothing. A
+    // building admin is an owner as far as broadcasts are concerned ("all owners" must reach
+    // them), so it is normalised here rather than at every send site.
+    const rawRole = request.headers.get('x-rentmaster-role') || null;
+    const role = rawRole === 'building_admin' ? 'owner' : rawRole;
     if (!userId) {
       return NextResponse.json({ success: false, error: 'Unauthorized.' }, { status: 401 });
     }

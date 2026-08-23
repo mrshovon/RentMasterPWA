@@ -6,6 +6,8 @@ import { apiError } from '@/lib/api-response';
 import { sendEmail } from '@/lib/email/brevo';
 import { accountCreated } from '@/lib/email/templates';
 import { resolveAppBaseUrl } from '@/lib/public-url';
+import { activateSubscription } from '@/lib/payments/activate';
+import { WHOLE_BUILDING_TIER_ID } from '@/lib/building';
 
 // =====================================================================================
 // 🛡️ ADMIN — OWNERS DIRECTORY
@@ -77,6 +79,29 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error: 'Password must be at least 8 characters.' }, { status: 400 });
     }
 
+    // THE ROLE SPLIT. `authRole` is what ends up in user_metadata and is the role the whole app
+    // reads. `profileRole` is what goes into user_profiles.role — a Postgres ENUM with only
+    // 'owner' and 'tenant' in it.
+    //
+    // A trigger on auth.users mirrors user_metadata.role into that enum on INSERT, so passing
+    // anything else to createUser() fails outright with an opaque "Database error creating new
+    // user". Both elevated roles are therefore created as 'owner' and PROMOTED immediately
+    // afterwards with updateUserById, which the trigger does not fire on. Keeping the profile row
+    // at 'owner' is also load-bearing: properties.owner_id has a foreign key to user_profiles.id,
+    // so an elevated account still needs a valid 'owner' row to hold properties of its own.
+    const ELEVATED_ROLES = ['admin', 'building_admin'];
+    const requestedRole = String(body.role || 'owner');
+    const authRole = ELEVATED_ROLES.includes(requestedRole) ? requestedRole : 'owner';
+    const profileRole = 'owner';
+
+    const buildingName = String(body.buildingName || '').trim().slice(0, 200);
+    if (authRole === 'building_admin' && !buildingName) {
+      return NextResponse.json(
+        { success: false, error: 'A building admin needs a building name.' },
+        { status: 400 }
+      );
+    }
+
     const { data: authUser, error: authError } = await supabaseAdminEngine.auth.admin.createUser({
       email: parsedEmail.value,
       password,
@@ -84,19 +109,60 @@ export async function POST(request: Request) {
       user_metadata: {
         name: body.name,
         phone: parsedPhone.value,
-        role: body.role || 'owner',
+        role: profileRole,
       },
     });
 
     if (authError || !authUser.user) throw authError;
+
+    // Promote. Metadata is SPREAD, not replaced — updateUserById overwrites the whole object, so
+    // naming only `role` here would silently wipe the name and phone set a moment ago.
+    if (authRole !== profileRole) {
+      const { error: promoteErr } = await supabaseAdminEngine.auth.admin.updateUserById(authUser.user.id, {
+        user_metadata: { ...(authUser.user.user_metadata || {}), role: authRole },
+      });
+      if (promoteErr) throw promoteErr;
+    }
 
     // Mirror into user_profiles (best-effort; ignore if a trigger already handles it).
     await supabaseAdminEngine.from('user_profiles').upsert({
       id: authUser.user.id,
       name: body.name || 'Owner',
       phone: parsedPhone.value,
-      role: body.role || 'owner',
+      role: profileRole,
     }, { onConflict: 'id' });
+
+    // A building admin is nothing without a building and a plan. Both are best-effort so a
+    // half-configured tier can never 500 the account creation — the admin gets the login plus a
+    // warning telling them exactly what to finish by hand.
+    const warnings: string[] = [];
+    if (authRole === 'building_admin') {
+      const { error: buildingErr } = await supabaseAdminEngine.from('buildings').insert({
+        id: crypto.randomUUID(),
+        admin_id: authUser.user.id,
+        name: buildingName,
+        address: String(body.buildingAddress || '').trim() || null,
+        city: String(body.buildingCity || '').trim() || null,
+      });
+      if (buildingErr) {
+        warnings.push(`The building record could not be created (${buildingErr.message}). Has ADD_BUILDINGS.sql been run?`);
+      }
+
+      // Without this row they resolve to the Free baseline and silently cap at 2 properties /
+      // 2 tenants, because a building admin is plan-governed exactly like an owner.
+      try {
+        await activateSubscription({
+          ownerId: authUser.user.id,
+          tierId: WHOLE_BUILDING_TIER_ID,
+          amountPaid: 0,
+          ref: 'ADMIN_ASSIGNED',
+        });
+      } catch (planErr: any) {
+        warnings.push(
+          `The Whole Building plan could not be assigned (${planErr?.message || planErr}). Assign it from the Plans tab, or they will be capped at the free limits.`
+        );
+      }
+    }
 
     // Welcome mail, fire-and-forget. Deliberately does NOT contain the password the admin just
     // set — that goes out-of-band, the way it always has. This only tells the person an account
@@ -111,7 +177,10 @@ export async function POST(request: Request) {
       }),
     });
 
-    return NextResponse.json({ success: true, ownerId: authUser.user.id }, { status: 201 });
+    return NextResponse.json(
+      { success: true, ownerId: authUser.user.id, role: authRole, warnings: warnings.length ? warnings : undefined },
+      { status: 201 }
+    );
   } catch (err) {
     return apiError(request, err);
   }

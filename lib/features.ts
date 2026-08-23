@@ -1,5 +1,5 @@
 import { supabaseAdminEngine } from './supabase-server';
-import { resolveOwnerSubscription, type WriteGuardResult } from './subscription';
+import { resolveOwnerSubscription, PLAN_GOVERNED_ROLES, type WriteGuardResult } from './subscription';
 
 // =====================================================================================
 // 🔐 PAID FEATURE GATING — which optional modules an owner may use.
@@ -130,8 +130,9 @@ export async function resolveFeature(ownerId: string, key: FeatureKey): Promise<
 }
 
 /**
- * Gate a route on a paid feature. No-op (ok) for any caller whose role is not 'owner', mirroring
- * assertOwnerCanWrite — tenants and admins are never blocked by an owner's add-ons.
+ * Gate a route on a paid feature. No-op (ok) for any caller whose role is not plan-governed,
+ * mirroring assertOwnerCanWrite — tenants and super admins are never blocked by an add-on.
+ * A building admin IS plan-governed: they reuse these same routes on their own plan.
  *
  * Apply this to READS as well as writes: hiding a tab in the UI is not a gate.
  */
@@ -140,7 +141,7 @@ export async function assertFeature(
   ownerId: string | null,
   key: FeatureKey
 ): Promise<WriteGuardResult> {
-  if (role !== 'owner' || !ownerId) return { ok: true };
+  if (!PLAN_GOVERNED_ROLES.includes(role || '') || !ownerId) return { ok: true };
   const state = await resolveFeature(ownerId, key);
   if (state.enabled) return { ok: true };
   return {

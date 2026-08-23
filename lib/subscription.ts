@@ -1,4 +1,5 @@
 import { supabaseAdminEngine } from './supabase-server';
+import { buildingMembershipOf, BUILDING_ADMIN_ROLE } from './building';
 
 // =====================================================================================
 // 📦 SUBSCRIPTION LIFECYCLE — single source of truth for owner plan enforcement.
@@ -15,6 +16,20 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 // Fallback Free limits if the free_tier row is somehow missing.
 const FREE_FALLBACK = { maxProperties: 2, maxTenants: 2 };
+
+// The tierId freeState() stamps on a planless owner. Declared here rather than imported from
+// lib/features.ts (FREE_TIER_ID) because features.ts imports this file — a cycle would leave one
+// of them half-initialised at module load. Same string, two homes, on purpose.
+const FREE_TIER_SENTINEL = 'free_tier';
+
+// Which roles a plan can actually gate. Tenants and super admins are never blocked by a plan;
+// owners and building admins both are, each on their own subscription. Exported so a route can
+// answer "is this caller plan-governed?" without re-deriving the list.
+export const PLAN_GOVERNED_ROLES: string[] = ['owner', BUILDING_ADMIN_ROLE];
+
+function isPlanGoverned(role: string | null): boolean {
+  return !!role && PLAN_GOVERNED_ROLES.includes(role);
+}
 
 export interface OwnerSubscription {
   tierId: string;
@@ -149,10 +164,14 @@ function freeState(
 }
 
 /**
- * Resolve the effective subscription state for an owner. Never throws for "no plan" —
- * a planless owner resolves to a perpetual Free state.
+ * Resolve an account's OWN subscription state, ignoring any building it belongs to.
+ * Never throws for "no plan" — a planless owner resolves to a perpetual Free state.
+ *
+ * Private: everything outside this file calls resolveOwnerSubscription() below, which layers
+ * the Whole Building substitution on top. Keeping this one separate is also what makes the
+ * substitution non-recursive — it resolves the building admin through THIS function.
  */
-export async function resolveOwnerSubscription(ownerId: string): Promise<OwnerSubscription> {
+async function resolveOwnSubscription(ownerId: string): Promise<OwnerSubscription> {
   // Admin-controlled hard revoke flag lives in auth user_metadata.
   let permissionsRevoked = false;
   try {
@@ -289,6 +308,54 @@ export async function resolveOwnerSubscription(ownerId: string): Promise<OwnerSu
   };
 }
 
+/**
+ * Resolve the effective subscription state for an owner, including the Whole Building plan
+ * they may sit under.
+ *
+ * A flat owner created by a building admin has no subscription_history row of their own — the
+ * building admin is the billing party. So when (and ONLY when) an owner's own resolution comes
+ * back genuinely planless, their building's plan is substituted in.
+ *
+ * Three rules this encodes, all deliberate:
+ *   * An owner's OWN paid plan always wins. Money already taken is never silently overridden,
+ *     and it keeps "attach an existing paying owner to a building" non-destructive.
+ *   * tierId is NOT rewritten. resolveOwnerFeatures() looks the tier id up in subscription_tiers
+ *     to decide which modules are bundled, so relabelling it here would quietly switch them off.
+ *     Only tierName carries the building's name.
+ *   * The member's own permissions_revoked is OR-ed in. Dropping it would make the super admin's
+ *     only hard lock over that individual account stop working.
+ *
+ * Every failure path returns the owner's own resolution unchanged, so before ADD_BUILDINGS.sql
+ * has run — or if the lookup errors for any reason at all — behaviour is byte-identical to
+ * what it was before this feature existed.
+ */
+export async function resolveOwnerSubscription(ownerId: string): Promise<OwnerSubscription> {
+  const own = await resolveOwnSubscription(ownerId);
+
+  // Only a genuinely planless owner is a candidate. A paid plan, a trial, a grace or a
+  // downgraded state all mean this owner's plan is their own business.
+  if (!own.isFree || own.tierId !== FREE_TIER_SENTINEL) return own;
+
+  try {
+    const membership = await buildingMembershipOf(ownerId);
+    if (!membership) return own;
+
+    const buildingPlan = await resolveOwnSubscription(membership.adminId);
+    const revoked = own.permissionsRevoked || buildingPlan.permissionsRevoked;
+
+    return {
+      ...buildingPlan,
+      tierName: `${buildingPlan.tierName} — ${membership.buildingName}`,
+      permissionsRevoked: revoked,
+      status: revoked ? 'locked' : buildingPlan.status,
+      lockReason: revoked ? buildingPlan.lockReason || 'revoked' : buildingPlan.lockReason,
+    };
+  } catch {
+    // A missing table, a PostgREST error, anything: fall back to what the owner resolved alone.
+    return own;
+  }
+}
+
 export interface WriteGuardResult {
   ok: boolean;
   status?: number;
@@ -296,11 +363,15 @@ export interface WriteGuardResult {
 }
 
 /**
- * Gate an owner "write/task" action on subscription state. No-op (ok) for any caller
- * whose role is not 'owner' (tenants + admins are never blocked by an owner's plan).
+ * Gate an owner "write/task" action on subscription state. No-op (ok) for any caller whose role
+ * is not plan-governed (tenants + super admins are never blocked by a plan).
+ *
+ * A building admin IS plan-governed, on their own Whole Building subscription. Leaving them out
+ * would have been the worst bug in this feature: they reuse every owner route, so an unrecognised
+ * role here would wave them straight past the lock on all of them.
  */
 export async function assertOwnerCanWrite(role: string | null, ownerId: string | null): Promise<WriteGuardResult> {
-  if (role !== 'owner' || !ownerId) return { ok: true };
+  if (!isPlanGoverned(role) || !ownerId) return { ok: true };
   const sub = await resolveOwnerSubscription(ownerId);
   if (sub.status === 'locked') {
     const msg =
@@ -353,8 +424,8 @@ export async function getDisabledItemIds(
 }
 
 /**
- * Gate a mutation that targets a specific property/tenant. No-op for non-owner callers.
- * Blocks (403 ITEM_DISABLED) when the target sits beyond the owner's current limit.
+ * Gate a mutation that targets a specific property/tenant. No-op for callers whose role is not
+ * plan-governed. Blocks (403 ITEM_DISABLED) when the target sits beyond the caller's limit.
  */
 export async function assertItemEnabled(
   role: string | null,
@@ -362,7 +433,7 @@ export async function assertItemEnabled(
   sub: OwnerSubscription,
   target: { propertyId?: string | null; tenantId?: string | null }
 ): Promise<WriteGuardResult> {
-  if (role !== 'owner' || !ownerId) return { ok: true };
+  if (!isPlanGoverned(role) || !ownerId) return { ok: true };
   // Unlimited on both axes ⇒ nothing can be disabled; skip the extra queries.
   if (sub.limits.maxProperties === -1 && sub.limits.maxTenants === -1) return { ok: true };
 

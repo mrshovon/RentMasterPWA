@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../lib/supabase-server';
-import { resolveOwnerSubscription, assertOwnerCanWrite, checkCreateLimit, assertItemEnabled } from '../../../../lib/subscription';
+import { resolveOwnerSubscription, assertOwnerCanWrite, checkCreateLimit, assertItemEnabled, PLAN_GOVERNED_ROLES } from '../../../../lib/subscription';
 import { generatePasscode, hashPasscode } from '../../../../lib/passcode';
 import { encryptField, hasEncryptionKey } from '../../../../lib/field-crypto';
 import { shapeTenantForOwner } from '../../../../lib/tenants';
@@ -83,7 +83,9 @@ export async function POST(request: NextRequest) {
     const guard = await assertOwnerCanWrite(role, ownerId);
     if (!guard.ok) return NextResponse.json(guard.body, { status: guard.status });
 
-    if (role === 'owner') {
+    // See the matching note in the properties route: a building admin is plan-governed too, so
+    // the limit check must recognise them rather than waving them through.
+    if (PLAN_GOVERNED_ROLES.includes(role || '')) {
       const sub = await resolveOwnerSubscription(ownerId);
       // Can't onboard into a disabled (over-limit) unit.
       const itemGuard = await assertItemEnabled(role, ownerId, sub, { propertyId });

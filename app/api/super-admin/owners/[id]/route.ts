@@ -4,6 +4,7 @@ import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { logPasswordReset, notifyPasswordChanged, clientIpFrom } from '@/lib/password-reset-log';
 import { getPresenceFor } from '@/lib/presence';
 import { apiError } from '@/lib/api-response';
+import { ownedBuilding, buildingMembershipOf, countActiveBuildingOwners } from '@/lib/building';
 
 // =====================================================================================
 // 🛡️ ADMIN — SINGLE OWNER
@@ -78,6 +79,12 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     // Per-device presence for this account (empty until ADD_PRESENCE.sql is run).
     const presence = (await getPresenceFor([id]))[id];
 
+    // Whole Building context: the building they run, or the one they are a flat owner in.
+    // Both helpers return null on any error, so this is inert before ADD_BUILDINGS.sql is run.
+    const runsBuilding = await ownedBuilding(id);
+    const memberOf = runsBuilding ? null : await buildingMembershipOf(id);
+    const memberCount = runsBuilding ? await countActiveBuildingOwners(runsBuilding.id) : 0;
+
     return NextResponse.json({
       success: true,
       data: {
@@ -103,6 +110,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         accounts_included_in_plan: accountsIncludedInPlan,
         propertyCount: propertyIds.length,
         tenantCount,
+        building: runsBuilding
+          ? { id: runsBuilding.id, name: runsBuilding.name, role: 'admin', ownerCount: memberCount }
+          : memberOf
+            ? { id: memberOf.buildingId, name: memberOf.buildingName, role: 'member', ownerCount: 0 }
+            : null,
       },
     }, { status: 200 });
   } catch (err) {
@@ -289,6 +301,23 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
       }
     }
 
+    // A building admin still holding owners must not be deleted out from under them: those
+    // owners' plans resolve through this account, so removing it silently drops every one of
+    // them back to the Free limits. Detach them first, deliberately.
+    const targetBuilding = await ownedBuilding(id);
+    if (targetBuilding) {
+      const members = await countActiveBuildingOwners(targetBuilding.id);
+      if (members > 0) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: `"${targetBuilding.name}" still has ${members} owner${members === 1 ? '' : 's'} attached. Detach or delete them first — deleting this account would drop their plans to the free limits.`,
+          },
+          { status: 409 }
+        );
+      }
+    }
+
     // --- Collect the id sets the child tables are keyed on -----------------------------
     const { data: propRows, error: propErr } = await supabaseAdminEngine
       .from('properties').select('id').eq('owner_id', id);
@@ -345,6 +374,15 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
       { table: 'support_tickets',            column: 'owner_id',         values: owned },
       { table: 'contact_messages',           column: 'owner_id',         values: owned },
       { table: 'password_reset_history',     column: 'owner_id',         values: owned },
+      // Whole Building. Children first: payments hang off invoices, invoices off the roster/owner,
+      // and the building is deleted last. `purge()` skips a table that does not exist yet via
+      // MISSING_SCHEMA_CODES, so these are safe to ship before the migrations have been run.
+      { table: 'building_service_payments',  column: 'owner_id',         values: owned },
+      { table: 'building_service_invoices',  column: 'owner_id',         values: owned },
+      { table: 'building_owners',            column: 'owner_id',         values: owned },
+      // The config lists and any invoices still hanging off the building are removed by its own
+      // `on delete cascade`, but the building row itself is deleted here.
+      { table: 'buildings',                  column: 'admin_id',         values: owned },
       { table: 'user_profiles',              column: 'id',               values: owned },
     ];
 

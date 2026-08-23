@@ -7,6 +7,7 @@ import {
 } from '@/lib/subscription';
 import { resolveOwnerFeatures } from '@/lib/features';
 import { computeExpiry } from '@/lib/payments/activate';
+import { buildingMembershipOf } from '@/lib/building';
 import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
@@ -78,6 +79,12 @@ export async function GET(request: NextRequest) {
       /* migration not run yet — the dashboard simply shows no modal */
     }
 
+    // A flat owner under a Whole Building plan is not the billing party — their building admin
+    // is. They get the building's identity so the Plan tab can say who covers them, and an EMPTY
+    // tier list so there is nothing to switch to. The POST below refuses the switch anyway; this
+    // just stops the UI offering a button that can only fail.
+    const membership = await buildingMembershipOf(uid);
+
     return NextResponse.json({
       success: true,
       subscription: sub,
@@ -88,7 +95,10 @@ export async function GET(request: NextRequest) {
         tenants: { current: usage.tenants, limit: sub.limits.maxTenants },
       },
       disabled: { propertyIds: disabledPropertyIds, tenantIds: disabledTenantIds },
-      availableTiers: tiers || [],
+      availableTiers: membership ? [] : tiers || [],
+      building: membership
+        ? { id: membership.buildingId, name: membership.buildingName, unitLabel: membership.unitLabel }
+        : null,
     }, { status: 200 });
   } catch (err) {
     return apiError(request, err);
@@ -99,6 +109,20 @@ export async function POST(request: NextRequest) {
   try {
     const uid = ownerId(request);
     if (!uid) return NextResponse.json({ error: 'Context matching identity missing.' }, { status: 400 });
+
+    // Checked BEFORE the tier lookup: a flat owner under a Whole Building plan has no plan of
+    // their own to change. Hiding the tier list in the UI is not a gate — this is.
+    const membership = await buildingMembershipOf(uid);
+    if (membership) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Your plan is managed by ${membership.buildingName}. Contact your building administrator to change it.`,
+          code: 'BUILDING_MANAGED_PLAN',
+        },
+        { status: 403 }
+      );
+    }
 
     const body = await request.json();
     const tierId = body.tierId;
