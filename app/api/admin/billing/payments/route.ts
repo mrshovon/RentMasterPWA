@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { assertOwnerCanWrite, resolveOwnerSubscription, assertItemEnabled } from '@/lib/subscription';
-import { ownerId, ownedLedger, recalcLedger, PAYMENT_METHODS, BILLING_PAYMENT_SELECT } from '@/lib/billing';
+import { ownerId, ownedLedger, recalcLedger, PAYMENT_METHODS, BILLING_PAYMENT_SELECT, SETTLED_INVOICE_ERROR } from '@/lib/billing';
 import { bookAutoTransaction } from '@/lib/accounts';
 import crypto from 'crypto';
 import { apiError } from '@/lib/api-response';
@@ -90,6 +90,13 @@ export async function POST(request: NextRequest) {
     const ledger = await ownedLedger(ledgerId, uid);
     if (!ledger) {
       return NextResponse.json({ success: false, error: 'Invoice not found.' }, { status: 404 });
+    }
+
+    // A settled invoice is frozen — no late top-ups, no corrections. Same rule (and message) as
+    // the status PATCH, so the disabled "Payment received" button on a paid row can't be bypassed
+    // by a stale tab or a hand-made request.
+    if (ledger.payment_status === 'paid') {
+      return NextResponse.json({ success: false, error: SETTLED_INVOICE_ERROR }, { status: 409 });
     }
 
     // Same gate as the status PATCH: a bill belonging to an over-limit tenant stays untouchable.

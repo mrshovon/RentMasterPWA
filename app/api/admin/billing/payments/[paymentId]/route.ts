@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { assertOwnerCanWrite } from '@/lib/subscription';
-import { ownerId, recalcLedger } from '@/lib/billing';
+import { ownerId, recalcLedger, SETTLED_INVOICE_ERROR } from '@/lib/billing';
 import { reverseAutoTransaction } from '@/lib/accounts';
 import { apiError } from '@/lib/api-response';
 
@@ -38,6 +38,19 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
       .maybeSingle();
     if (!existing) {
       return NextResponse.json({ success: false, error: 'Payment not found.' }, { status: 404 });
+    }
+
+    // The freeze rule lives here too, and this is the guard that actually matters: without it,
+    // "you can't change a settled invoice" is bypassed by deleting an installment, because the
+    // recalc below would walk the status straight back down to partial/unpaid.
+    const { data: parentLedger } = await supabaseAdminEngine
+      .from('billing_ledgers')
+      .select('payment_status')
+      .eq('id', existing.ledger_id)
+      .eq('created_by_owner', uid)
+      .maybeSingle();
+    if (parentLedger?.payment_status === 'paid') {
+      return NextResponse.json({ success: false, error: SETTLED_INVOICE_ERROR }, { status: 409 });
     }
 
     const { error } = await supabaseAdminEngine

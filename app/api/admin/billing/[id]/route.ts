@@ -4,7 +4,7 @@ import { supabaseAdminEngine } from '../../../../../lib/supabase-server';
 import { assertOwnerCanWrite, resolveOwnerSubscription, assertItemEnabled } from '../../../../../lib/subscription';
 import { sendPushToUsers } from '../../../../../lib/push-send';
 import { bookAutoTransaction, reverseAutoTransaction } from '../../../../../lib/accounts';
-import { ownedLedger, recalcLedger, balanceOf } from '../../../../../lib/billing';
+import { ownedLedger, recalcLedger, balanceOf, SETTLED_INVOICE_ERROR } from '../../../../../lib/billing';
 import crypto from 'crypto';
 import { apiError } from '@/lib/api-response';
 
@@ -18,6 +18,10 @@ import { apiError } from '@/lib/api-response';
 //   'unpaid' -> delete every recorded payment ("I entered this by mistake")
 // Only 'sent' is still a status the caller writes, because it is a tenant's claim about money
 // rather than a record of money received. 'partial' is never accepted here — it is derived.
+//
+// Once the invoice reaches 'paid' it is FROZEN: every caller, owner or tenant, gets a 409 from
+// here on. See SETTLED_INVOICE_ERROR in lib/billing.ts and the sibling guards in the two
+// billing_payments routes — a settled invoice is a financial record, not a toggle.
 // ==============================================================================
 export async function PATCH(
   request: NextRequest,
@@ -43,18 +47,33 @@ export async function PATCH(
     const guard = await assertOwnerCanWrite(role, ownerId);
     if (!guard.ok) return NextResponse.json(guard.body, { status: guard.status });
 
-    // Owner can't toggle a bill belonging to a disabled (over-limit) tenant. The prior status is
-    // read here too, so a pure payment-date edit (paid -> paid) can skip the "confirmed" push.
-    let previousPaymentStatus: string | null = null;
-    if (role === 'owner') {
-      const { data: led } = await supabaseAdminEngine
-        .from('billing_ledgers').select('tenant_id, property_id, payment_status').eq('id', billingRecordId).maybeSingle();
-      if (led) {
-        previousPaymentStatus = led.payment_status ?? null;
-        const sub = await resolveOwnerSubscription(ownerId);
-        const itemGuard = await assertItemEnabled(role, ownerId, sub, { tenantId: led.tenant_id, propertyId: led.property_id });
-        if (!itemGuard.ok) return NextResponse.json(itemGuard.body, { status: itemGuard.status });
-      }
+    // 2b. The invoice as it stands, scoped to the caller so neither role can probe another
+    // account's row. Read for BOTH roles now — the settled-invoice guard below applies to the
+    // tenant's 'sent' claim just as much as to the owner's status buttons.
+    const ledgerLookup = supabaseAdminEngine
+      .from('billing_ledgers')
+      .select('tenant_id, property_id, payment_status')
+      .eq('id', billingRecordId);
+    const { data: currentLedger } = await (callerTenantId
+      ? ledgerLookup.eq('tenant_id', callerTenantId)
+      : ledgerLookup.eq('created_by_owner', ownerId as string)
+    ).maybeSingle();
+    const previousPaymentStatus: string | null = currentLedger?.payment_status ?? null;
+
+    // Owner can't toggle a bill belonging to a disabled (over-limit) tenant.
+    if (role === 'owner' && currentLedger) {
+      const sub = await resolveOwnerSubscription(ownerId);
+      const itemGuard = await assertItemEnabled(role, ownerId, sub, {
+        tenantId: currentLedger.tenant_id, propertyId: currentLedger.property_id,
+      });
+      if (!itemGuard.ok) return NextResponse.json(itemGuard.body, { status: itemGuard.status });
+    }
+
+    // 2c. A settled invoice is FROZEN for everyone — the owner cannot walk it back to unpaid/sent
+    // and the tenant cannot re-flag it as sent. Checked before the body is even parsed, so no
+    // status write, payment row or notification can slip past it.
+    if (previousPaymentStatus === 'paid') {
+      return NextResponse.json({ error: SETTLED_INVOICE_ERROR }, { status: 409 });
     }
 
     // 3. Extract parameter updates request body JSON
@@ -221,9 +240,10 @@ export async function PATCH(
       }
     }
 
-    // 4b-ii. Owner confirmed the payment — tell the tenant their bill is settled. Skipped when the
-    // bill was ALREADY paid, so correcting the payment date doesn't buzz the tenant a second time.
-    if (paymentStatus === 'paid' && ownerId && updatedLedgerRecord && previousPaymentStatus !== 'paid') {
+    // 4b-ii. Owner confirmed the payment — tell the tenant their bill is settled. No "already
+    // paid" test is needed any more: 2c turns an already-settled invoice away with a 409, so
+    // reaching here at all means this is the first time it settled.
+    if (paymentStatus === 'paid' && ownerId && updatedLedgerRecord) {
       try {
         await sendPushToUsers([updatedLedgerRecord.tenant_id], {
           title: 'Payment confirmed',

@@ -89,6 +89,14 @@ export async function recalcLedger(ledgerId: string) {
   return updated;
 }
 
+/**
+ * A settled invoice is frozen: once the owner has confirmed the money, neither side may move the
+ * status again, and no installment may be added or deleted (deleting one would walk the status
+ * back down through recalcLedger). Every billing route that could unsettle a ledger returns this
+ * with a 409 — the UI disables the controls, this is what makes the rule real.
+ */
+export const SETTLED_INVOICE_ERROR = 'This invoice is settled and can no longer be changed.';
+
 /** Money still owed on an invoice, never negative (an overpayment reads as zero owed). */
 export function balanceOf(ledger: { total_payable?: any; amount_paid?: any } | null): number {
   if (!ledger) return 0;
