@@ -4,6 +4,7 @@ import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { sendPushToUsers } from '@/lib/push-send';
 import { activateSubscription } from '@/lib/payments/activate';
 import { apiError } from '@/lib/api-response';
+import { shapeSubmission } from '@/lib/payments/submissions';
 
 // =====================================================================================
 // PAYMENT SUBMISSIONS — ADMIN DECISION
@@ -97,7 +98,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       }
     }
 
-    return NextResponse.json({ success: true, data: row }, { status: 200 });
+    return NextResponse.json({ success: true, data: shapeSubmission(row) }, { status: 200 });
   } catch (err) {
     return apiError(request, err);
   }

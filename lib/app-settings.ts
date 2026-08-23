@@ -1,4 +1,5 @@
 import { supabaseAdminEngine } from './supabase-server';
+import { encryptField, decryptField, hasEncryptionKey } from './field-crypto';
 
 // =====================================================================================
 // APP SETTINGS — tiny key/value store for platform-wide admin config (app_settings table).
@@ -10,6 +11,20 @@ export interface PaymentConfig {
   walletNumber: string;   // the MFS personal number owners pay into
   instructions: string;   // steps shown on the owner payment screen
   qrUrl: string | null;   // public URL of the QR image in the payment-assets bucket
+}
+
+/**
+ * How payment_config is actually stored. `walletNumberEnc` holds the encrypted number; the
+ * plaintext `walletNumber` is only present on rows written before the encryption change and is
+ * read as a fallback so the payment screen keeps working across the migration.
+ *
+ * Encrypted rather than hashed because owners have to READ it — it is the number they pay into.
+ * Safe to encrypt because app_settings is a key/value singleton store that is never queried by
+ * value, only by `key`.
+ */
+interface StoredPaymentConfig extends Omit<PaymentConfig, 'walletNumber'> {
+  walletNumber?: string;
+  walletNumberEnc?: string;
 }
 
 export const DEFAULT_PAYMENT_CONFIG: PaymentConfig = {
@@ -38,7 +53,40 @@ export async function setSetting(key: string, value: unknown): Promise<void> {
   if (error) throw error;
 }
 
-export const getPaymentConfig = () => getSetting<PaymentConfig>('payment_config', DEFAULT_PAYMENT_CONFIG);
+/**
+ * The payment config with the wallet number decrypted, which is what every caller wants — the
+ * owner payment screen, the manual-bKash provider and the admin editor all read `walletNumber`.
+ * Decrypting in one place means no caller has to know the field is encrypted at rest.
+ */
+export async function getPaymentConfig(): Promise<PaymentConfig> {
+  const stored = await getSetting<StoredPaymentConfig>('payment_config', DEFAULT_PAYMENT_CONFIG);
+  const { walletNumberEnc, ...rest } = stored;
+  return {
+    ...DEFAULT_PAYMENT_CONFIG,
+    ...rest,
+    walletNumber: decryptField(walletNumberEnc) ?? stored.walletNumber ?? '',
+  };
+}
+
+/**
+ * Write the payment config, encrypting the wallet number. The plaintext key is explicitly cleared
+ * so a pre-migration value cannot linger next to the ciphertext and quietly become the one that
+ * gets read back.
+ * @throws when no encryption key is configured — better to refuse than to store the number
+ *         admins collect real money on in the clear.
+ */
+export async function setPaymentConfig(config: PaymentConfig): Promise<void> {
+  const { walletNumber, ...rest } = config;
+  const trimmed = (walletNumber || '').trim();
+  if (trimmed && !hasEncryptionKey()) {
+    throw new Error('Cannot save the wallet number: FIELD_ENCRYPTION_KEY is not configured.');
+  }
+  await setSetting('payment_config', {
+    ...rest,
+    walletNumber: '',
+    walletNumberEnc: trimmed ? encryptField(trimmed) : '',
+  } satisfies StoredPaymentConfig);
+}
 
 // -------------------------------------------------------------------------------------
 // MAINTENANCE MODE — admin-declared downtime window. When enabled, owners and tenants get a
@@ -64,6 +112,29 @@ export const getMaintenanceMode = () =>
 
 // The tier id given to newly self-signed-up owners. Empty/absent => implicit free (no history row).
 export const getDefaultSignupTier = () => getSetting<{ tierId: string }>('default_signup_tier', { tierId: '' });
+
+// -------------------------------------------------------------------------------------
+// LEGAL DOCUMENT VERSION — which edition of the Terms and Privacy Policy is currently published.
+//
+// Stored here rather than hardcoded so the version can be bumped when the documents change
+// without a redeploy, the same way `default_signup_tier` is set from the admin console.
+//
+// The signup form fetches this, shows the matching documents, and echoes the version back on
+// submit, so what lands in `terms_acceptances.version` is the edition the person was actually
+// shown — not whatever the server happened to consider current a moment later.
+//
+// The default is the date the first edition was published. A date is used rather than a number
+// because it matches the "Effective date" printed at the top of the documents themselves, so a
+// stored value can be traced to a specific text.
+// -------------------------------------------------------------------------------------
+export const DEFAULT_TERMS_VERSION = '2026-08-15';
+
+export const getTermsVersion = async (): Promise<string> => {
+  const { version } = await getSetting<{ version: string }>('terms_version', {
+    version: DEFAULT_TERMS_VERSION,
+  });
+  return (version || '').trim() || DEFAULT_TERMS_VERSION;
+};
 
 // -------------------------------------------------------------------------------------
 // ANNOUNCEMENT — an admin-written popup shown to owners and tenants when they open the app.

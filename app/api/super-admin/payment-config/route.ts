@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { getPaymentConfig, setSetting, DEFAULT_PAYMENT_CONFIG } from '@/lib/app-settings';
+import { getPaymentConfig, setPaymentConfig, DEFAULT_PAYMENT_CONFIG } from '@/lib/app-settings';
 import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
@@ -30,7 +30,9 @@ export async function PUT(request: NextRequest) {
       instructions: typeof body.instructions === 'string' ? body.instructions.trim() : DEFAULT_PAYMENT_CONFIG.instructions,
       qrUrl: body.qrUrl ? String(body.qrUrl) : null,
     };
-    await setSetting('payment_config', config);
+    // setPaymentConfig encrypts the wallet number at rest; the response echoes the plaintext the
+    // admin just typed, which is what the editor re-renders.
+    await setPaymentConfig(config);
     return NextResponse.json({ success: true, data: config }, { status: 200 });
   } catch (err) {
     return apiError(request, err);

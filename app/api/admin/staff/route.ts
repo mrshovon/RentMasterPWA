@@ -3,7 +3,7 @@ import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { assertOwnerCanWrite } from '@/lib/subscription';
 import { assertFeature } from '@/lib/features';
-import { ownerId, STAFF_SELECT, staffFieldsFrom, resolvePropertyId } from '@/lib/staff';
+import { ownerId, STAFF_SELECT, staffFieldsFrom, resolvePropertyId, shapeStaffForOwner } from '@/lib/staff';
 import crypto from 'crypto';
 import { apiError } from '@/lib/api-response';
 
@@ -31,7 +31,11 @@ export async function GET(request: NextRequest) {
       .order('created_at', { ascending: false });
     if (error) throw error;
 
-    return NextResponse.json({ success: true, count: data?.length || 0, data: data || [] }, { status: 200 });
+    // NID decrypted for the owner who entered it; the ciphertext column never leaves the server.
+    // Shared with the POST/PATCH routes so the responses can never drift — see lib/staff.ts.
+    const shaped = (data || []).map(shapeStaffForOwner);
+
+    return NextResponse.json({ success: true, count: shaped.length, data: shaped }, { status: 200 });
   } catch (err) {
     return apiError(request, err);
   }
@@ -83,7 +87,7 @@ export async function POST(request: NextRequest) {
       return apiError(request, insertError);
     }
 
-    return NextResponse.json({ success: true, data: row }, { status: 201 });
+    return NextResponse.json({ success: true, data: shapeStaffForOwner(row) }, { status: 201 });
   } catch (err) {
     return apiError(request, err);
   }

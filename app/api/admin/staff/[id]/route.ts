@@ -3,7 +3,7 @@ import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { assertOwnerCanWrite } from '@/lib/subscription';
 import { assertFeature } from '@/lib/features';
-import { ownerId, STAFF_SELECT, staffFieldsFrom, resolvePropertyId, ownsStaff } from '@/lib/staff';
+import { ownerId, STAFF_SELECT, staffFieldsFrom, resolvePropertyId, ownsStaff, shapeStaffForOwner } from '@/lib/staff';
 import { apiError } from '@/lib/api-response';
 
 // =====================================================================================
@@ -45,7 +45,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       .eq('owner_id', uid)
       .order('paid_on', { ascending: false });
 
-    return NextResponse.json({ success: true, data: row, payments: payments || [] }, { status: 200 });
+    return NextResponse.json({ success: true, data: shapeStaffForOwner(row), payments: payments || [] }, { status: 200 });
   } catch (err) {
     return apiError(request, err);
   }
@@ -100,7 +100,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       .single();
     if (error) throw error;
 
-    return NextResponse.json({ success: true, data: row }, { status: 200 });
+    return NextResponse.json({ success: true, data: shapeStaffForOwner(row) }, { status: 200 });
   } catch (err) {
     return apiError(request, err);
   }

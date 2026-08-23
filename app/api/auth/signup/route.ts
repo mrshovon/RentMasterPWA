@@ -1,11 +1,13 @@
 import { NextResponse } from 'next/server';
 import { supabaseClient, supabaseAdminEngine } from '@/lib/supabase-server';
-import { getDefaultSignupTier } from '@/lib/app-settings';
+import { getDefaultSignupTier, getTermsVersion } from '@/lib/app-settings';
 import { activateSubscription } from '@/lib/payments/activate';
 import { validateEmail, validatePhone } from '@/lib/validate';
 import { sendEmail } from '@/lib/email/brevo';
 import { accountCreated } from '@/lib/email/templates';
 import { resolveAppBaseUrl } from '@/lib/public-url';
+import { clientIpFrom } from '@/lib/password-reset-log';
+import crypto from 'crypto';
 
 // =====================================================================================
 // 🔐 OWNER SELF-SIGNUP — public route (not behind middleware auth, like login/forgot).
@@ -74,6 +76,22 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error: 'Your name is required.' }, { status: 400, headers: cors });
     }
 
+    // Terms acceptance. Enforced HERE and not only by the disabled button on the form, because a
+    // client-side tick-box is not a consent record — this route is public and takes any JSON.
+    if (body.acceptedTerms !== true) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Please accept the Terms and Conditions and the Privacy Policy to continue.',
+          code: 'TERMS_NOT_ACCEPTED',
+        },
+        { status: 400, headers: cors },
+      );
+    }
+    // The version the form actually displayed, echoed back. Falling back to the server's current
+    // value would record consent against text this person may never have seen.
+    const termsVersion = String(body.termsVersion || '').trim() || (await getTermsVersion());
+
     const key = email;
     if (isThrottled(key)) {
       return NextResponse.json({ success: false, error: 'Too many attempts. Please wait a few minutes and try again.' }, { status: 429, headers: cors });
@@ -106,6 +124,29 @@ export async function POST(request: Request) {
       phone: phone || '',
       role: 'owner',
     }, { onConflict: 'id' });
+
+    // Record the acceptance. Deliberately NOT best-effort like the upsert above: this row is the
+    // evidence that the person agreed, and silently losing it would leave an account that looks
+    // consented-to and is not. Logged loudly if it fails — but the signup itself still completes,
+    // because refusing an account after the auth user already exists would strand them with a
+    // half-made account they cannot retry (the email is now taken).
+    try {
+      const { error: consentError } = await supabaseAdminEngine.from('terms_acceptances').insert([{
+        id: crypto.randomUUID(), // no DB default on id — generate it here
+        owner_id: ownerId,
+        document: 'terms',
+        version: termsVersion,
+        ip: clientIpFrom(request.headers),
+        user_agent: (request.headers.get('user-agent') || '').slice(0, 400),
+        accepted_at: new Date().toISOString(),
+      }]);
+      if (consentError) throw consentError;
+    } catch (consentErr: any) {
+      console.error(
+        `[signup] TERMS ACCEPTANCE NOT RECORDED for ${ownerId} (v${termsVersion}):`,
+        consentErr?.message || consentErr,
+      );
+    }
 
     // Apply the admin-configured default plan. Free/absent => no history row (implicit perpetual
     // free). A non-free default is a promotional grant, activated at zero cost.

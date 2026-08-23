@@ -1,6 +1,7 @@
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from './supabase-server';
 import { validatePhone } from './validate';
+import { encryptField, decryptField, hasEncryptionKey } from './field-crypto';
 
 // =====================================================================================
 // 👷 STAFF — shared helpers for the /api/admin/staff routes.
@@ -52,13 +53,59 @@ export function staffFieldsFrom(body: any): Record<string, unknown> {
   if (body.designation !== undefined) out.designation = text(body.designation);
   if (body.monthlySalary !== undefined) out.monthly_salary = Number(body.monthlySalary) || 0;
   if (body.joiningDate !== undefined) out.joining_date = text(body.joiningDate);
-  if (body.nidNumber !== undefined) out.nid_number = text(body.nidNumber);
+  if (body.nidNumber !== undefined) {
+    // A staff NID is a government identifier and gets the same treatment as a tenant's: encrypted
+    // at rest, readable back only by the owner who entered it. It was stored in plaintext until
+    // now, which was a straight inconsistency with tenants.nid_encrypted.
+    //
+    // Encrypted rather than hashed for the same reason as the tenant NID — the owner has to be
+    // able to read it back to confirm it or fix a typo.
+    const nid = text(body.nidNumber);
+    if (nid && !hasEncryptionKey()) {
+      // Fail loudly BEFORE the write. Storing nothing while telling the owner it saved is worse
+      // than refusing, and silently falling back to plaintext would defeat the whole change.
+      throw new StaffFieldError(
+        'Cannot save a national ID: FIELD_ENCRYPTION_KEY is not configured on the server.',
+      );
+    }
+    out.nid_encrypted = nid ? encryptField(nid) : null;
+    // Clear any legacy plaintext on the same row. Editing a staff member is therefore also the
+    // migration for that row, independent of the backfill.
+    out.nid_number = null;
+  }
   if (body.nidDocUrl !== undefined) out.nid_doc_url = text(body.nidDocUrl);
   if (body.photoUrl !== undefined) out.photo_url = text(body.photoUrl);
   if (body.address !== undefined) out.address = text(body.address);
   if (body.notes !== undefined) out.notes = text(body.notes);
   if (body.isActive !== undefined) out.is_active = !!body.isActive;
   return out;
+}
+
+/**
+ * Shape a staff row for the owner: decrypt the NID back into `nid_number` (the key the UI already
+ * reads) and drop the ciphertext column so it never reaches the browser.
+ *
+ * Used by EVERY route that returns a staff row — list, create, read and update — so the four
+ * responses cannot drift. That drift is not hypothetical: the tenant equivalent shipped a PATCH
+ * that returned the raw row while GET returned a shaped one, which is exactly the bug the comment
+ * at lib/tenants.ts:13-17 records.
+ *
+ * Rows written before the encryption change still hold plaintext in `nid_number`; those are passed
+ * through untouched, so the UI reads correctly either side of the backfill.
+ */
+export function shapeStaffForOwner(row: any) {
+  if (!row) return row;
+
+  const { nid_encrypted, nid_number, ...rest } = row;
+  const decrypted = decryptField(nid_encrypted);
+
+  // Ciphertext that will not decrypt is otherwise indistinguishable from "no NID on file", which
+  // would quietly look like data loss. Say so in the server log; the owner still gets a usable row.
+  if (nid_encrypted && decrypted === null) {
+    console.warn(`[staff] nid_encrypted failed to decrypt for staff ${row.id} — wrong or rotated key?`);
+  }
+
+  return { ...rest, nid_number: decrypted ?? nid_number ?? null };
 }
 
 /**

@@ -3,7 +3,7 @@ import { supabaseClient, supabaseAdminEngine } from '@/lib/supabase-server';
 import { signTenantToken } from '@/lib/tenant-jwt';
 import { isTenantLoginBlocked, TENANT_BLOCKED_MESSAGE } from '@/lib/tenant-access';
 import { normalizePhone, phoneLookupCandidates } from '@/lib/validate';
-import crypto from 'crypto';
+import { verifyPasscode, hashPasscode } from '@/lib/passcode';
 
 // =====================================================================================
 // 🔐 UNIFIED LOGIN
@@ -117,13 +117,30 @@ export async function POST(request: Request) {
       if (error) throw error;
       const tenant = matches?.[0] ?? null;
 
-      const hash = crypto.createHash('sha256').update(String(passcode).trim()).digest('hex');
-      // Uniform error for "no such tenant" and "wrong passcode" (no account enumeration).
-      if (!tenant || hash !== tenant.password_hash) {
+      // verifyPasscode handles both schemes: the current salted scrypt and the legacy unsalted
+      // sha256 that predates it. Uniform error for "no such tenant" and "wrong passcode" (no
+      // account enumeration).
+      const verified = verifyPasscode(passcode, tenant?.password_hash);
+      if (!tenant || !verified.ok) {
         recordFailure(key);
         return NextResponse.json({ success: false, error: 'Invalid phone or passcode.' }, { status: 401, headers: cors });
       }
       clearFailures(key);
+
+      // Transparent hash upgrade: this row verified against the legacy unsalted sha256, so
+      // re-hash it as scrypt now that we hold the plaintext. This is the entire migration path —
+      // tenants move over as they sign in, with no passcode reset and no lockout. Deliberately
+      // fire-and-forget: a failed upgrade must never cost this tenant their login, and the next
+      // sign-in will simply try again.
+      if (verified.needsUpgrade) {
+        void supabaseAdminEngine
+          .from('tenants')
+          .update({ password_hash: hashPasscode(passcode) })
+          .eq('id', tenant.id)
+          .then(({ error: upgradeErr }) => {
+            if (upgradeErr) console.error('Passcode hash upgrade failed:', upgradeErr.message);
+          });
+      }
 
       // Access check runs only AFTER the passcode verifies, so it can't be used to enumerate
       // accounts — and it does not count as a failed attempt, since the credentials were right.

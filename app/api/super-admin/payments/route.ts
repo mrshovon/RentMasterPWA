@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { apiError } from '@/lib/api-response';
+import { shapeSubmission } from '@/lib/payments/submissions';
 
 // =====================================================================================
 // PAYMENT SUBMISSIONS — ADMIN QUEUE
@@ -47,7 +48,9 @@ export async function GET(request: NextRequest) {
     for (const t of tiers || []) tierNameById[t.id] = t.name;
 
     const enriched = (rows || []).map((r) => ({
-      ...r,
+      // shapeSubmission decrypts sender_msisdn / txn_id, which the admin reconciles by eye
+      // against the bKash statement. See lib/payments/submissions.ts.
+      ...shapeSubmission(r),
       owner: ownerById[r.owner_id] || null,
       tier_name: tierNameById[r.tier_id] || r.tier_id,
     }));
