@@ -12,8 +12,9 @@ import crypto from 'crypto';
 // Two automations also live here (bookAutoTransaction / reverseAutoTransaction): marking an
 // invoice Paid books an income, and logging a staff salary books an expense. Both post to the
 // owner's DEFAULT account and are deliberately best-effort — a caller must never fail its own
-// request because the bookkeeping side-effect broke, and nothing is booked when the owner has
-// no default account or hasn't got the Accounts feature enabled.
+// request because the bookkeeping side-effect broke. An owner who never set an account up gets
+// one created for them (ensureDefaultAccount); nothing is booked only when they haven't got the
+// Accounts feature enabled.
 // =====================================================================================
 
 /** The owner id the middleware injected, or null when the request has no usable identity. */
@@ -128,6 +129,74 @@ export async function setDefaultAccount(id: string, uid: string): Promise<void> 
     .eq('owner_id', uid);
 }
 
+/**
+ * The account the automations post into, created on demand if the owner never set one up.
+ *
+ * Money arriving must never be dropped for the want of bookkeeping setup — that was the old
+ * behaviour and it silently swallowed every service charge and space rent an owner collected
+ * before they opened the Accounts tab. Resolution order:
+ *   1. the active default account (the overwhelmingly common case — nothing changes);
+ *   2. failing that, their oldest active cash account, promoted to default (covers a default
+ *      account that was later deleted);
+ *   3. failing that, a fresh "Cash in Hand" — the same name the UI already gives type 'cash'.
+ *
+ * Returns null only when nothing could be resolved OR created, in which case the caller no-ops
+ * exactly as it used to. Callers must still check the 'accounts' feature FIRST: an owner without
+ * the add-on must not have an account conjured up for them.
+ */
+export async function ensureDefaultAccount(uid: string): Promise<string | null> {
+  const findDefault = async (): Promise<string | null> => {
+    const { data } = await supabaseAdminEngine
+      .from('accounts')
+      .select('id')
+      .eq('owner_id', uid)
+      .eq('is_default', true)
+      .eq('is_active', true)
+      .maybeSingle();
+    return data?.id ? String(data.id) : null;
+  };
+
+  const existing = await findDefault();
+  if (existing) return existing;
+
+  // A default that was deleted leaves the owner with accounts but no target. Promote rather than
+  // create, so their money keeps landing where they have been keeping it.
+  const { data: cash } = await supabaseAdminEngine
+    .from('accounts')
+    .select('id')
+    .eq('owner_id', uid)
+    .eq('type', 'cash')
+    .eq('is_active', true)
+    .order('created_at', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (cash?.id) {
+    await setDefaultAccount(String(cash.id), uid);
+    return String(cash.id);
+  }
+
+  const { data: created, error } = await supabaseAdminEngine
+    .from('accounts')
+    .insert([{
+      id: crypto.randomUUID(),
+      owner_id: uid,
+      name: 'Cash in Hand',
+      type: 'cash',
+      opening_balance: 0,
+      is_default: true,
+      is_active: true,
+    }])
+    .select('id')
+    .single();
+
+  if (!error && created?.id) return String(created.id);
+
+  // accounts_one_default_idx is a partial UNIQUE index, so two automations firing at once means
+  // the loser errors here rather than creating a second default. Re-read instead of failing.
+  console.error('[accounts] ensureDefaultAccount insert failed (non-fatal):', error?.message);
+  return await findDefault();
+}
+
 // -------------------------------------------------------------------------------------
 // Automations — best-effort, feature-gated. Callers wrap these in try/catch and never let
 // a failure here break the invoice / salary flow that triggered them.
@@ -147,7 +216,7 @@ interface AutoTxnInput {
  * Book an automatic income/expense into the owner's default account. No-op (and no error) when:
  *   - the owner doesn't have the Accounts feature enabled,
  *   - the amount isn't a positive number,
- *   - the owner has no active default account (they simply haven't set one up yet).
+ *   - no account could be resolved or created at all (see ensureDefaultAccount).
  * Idempotent: upserts on the (source, source_ref) unique index, so re-firing the same event
  * (e.g. re-marking an invoice Paid) updates the single row instead of duplicating it.
  */
@@ -158,14 +227,9 @@ export async function bookAutoTransaction(uid: string, input: AutoTxnInput): Pro
   const feature = await resolveFeature(uid, 'accounts');
   if (!feature.enabled) return;
 
-  const { data: acct } = await supabaseAdminEngine
-    .from('accounts')
-    .select('id')
-    .eq('owner_id', uid)
-    .eq('is_default', true)
-    .eq('is_active', true)
-    .maybeSingle();
-  if (!acct) return; // no default account -> nothing to book against
+  // Creates a 'Cash in Hand' account when the owner has none, so income is never dropped.
+  const accountId = await ensureDefaultAccount(uid);
+  if (!accountId) return;
 
   const txnDate = /^\d{4}-\d{2}-\d{2}$/.test(input.txnDate)
     ? input.txnDate
@@ -182,7 +246,7 @@ export async function bookAutoTransaction(uid: string, input: AutoTxnInput): Pro
     .insert([{
       id: crypto.randomUUID(),
       owner_id: uid,
-      account_id: acct.id,
+      account_id: accountId,
       property_id: input.propertyId,
       direction: input.direction,
       amount,
