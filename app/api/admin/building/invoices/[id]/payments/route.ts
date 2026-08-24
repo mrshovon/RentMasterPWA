@@ -113,6 +113,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     // Income into the building's books. source is 'billing' rather than a new value so the
     // account_transactions CHECK constraint stays untouched; source_ref is the PAYMENT id, which
     // is a fresh uuid and so can never collide with a rent ledger's.
+    //
+    // propertyId stays null — account_transactions.property_id is a FK to properties(id), and a
+    // flat owner's unit is deliberately NOT a properties row (see ADD_BUILDINGS.sql). So the flat
+    // is named in the note instead, which is what the Accounts tab renders on the row. Without it
+    // a month of collections is an undifferentiated list of "Service charge".
     try {
       await bookAutoTransaction(gate.uid!, {
         direction: 'income',
@@ -122,6 +127,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         txnDate: paidOn,
         source: 'billing',
         sourceRef: String(payment.id),
+        note: await describePayer(String(invoice.owner_id), String(invoice.billing_month || '')),
       });
     } catch (bookErr) {
       console.error('[building-billing] bookAutoTransaction failed (non-fatal):', bookErr);
@@ -143,4 +149,38 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   } catch (err) {
     return apiError(request, err);
   }
+}
+
+/**
+ * "Flat 4B · Md Karim · 2026-08" — who this service charge came from, for the accounts row.
+ *
+ * Two lookups rather than one embedded select: there is no foreign key between
+ * building_service_invoices.owner_id and building_owners.owner_id, so PostgREST cannot infer the
+ * relationship and an embed would fail. Best-effort throughout — every part is optional, and an
+ * owner whose roster row or profile has gone missing still gets their payment booked, just
+ * without the label.
+ */
+async function describePayer(ownerId: string, billingMonth: string): Promise<string | null> {
+  const parts: string[] = [];
+  try {
+    const { data: roster } = await supabaseAdminEngine
+      .from('building_owners')
+      .select('unit_label')
+      .eq('owner_id', ownerId)
+      .maybeSingle();
+    const unit = String(roster?.unit_label || '').trim();
+    if (unit) parts.push(unit);
+
+    const { data: profile } = await supabaseAdminEngine
+      .from('user_profiles')
+      .select('name')
+      .eq('id', ownerId)
+      .maybeSingle();
+    const name = String(profile?.name || '').trim();
+    if (name) parts.push(name);
+  } catch (lookupErr) {
+    console.error('[building-billing] payer lookup failed (non-fatal):', lookupErr);
+  }
+  if (billingMonth) parts.push(billingMonth);
+  return parts.length ? parts.join(' · ') : null;
 }

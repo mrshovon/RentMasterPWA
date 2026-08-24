@@ -210,6 +210,9 @@ interface AutoTxnInput {
   txnDate: string; // YYYY-MM-DD
   source: 'billing' | 'staff_salary';
   sourceRef: string;
+  /** Free text shown on the transaction row. Use it to name what the money was for when the
+   *  category alone is ambiguous — a service charge says nothing about WHICH flat paid it. */
+  note?: string | null;
 }
 
 /**
@@ -252,7 +255,7 @@ export async function bookAutoTransaction(uid: string, input: AutoTxnInput): Pro
       amount,
       category: input.category,
       txn_date: txnDate,
-      note: null,
+      note: input.note ?? null,
       source: input.source,
       source_ref: input.sourceRef,
     }]);
