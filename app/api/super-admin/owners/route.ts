@@ -8,6 +8,7 @@ import { accountCreated } from '@/lib/email/templates';
 import { resolveAppBaseUrl } from '@/lib/public-url';
 import { activateSubscription } from '@/lib/payments/activate';
 import { WHOLE_BUILDING_TIER_ID, isDuplicateEmailError, LOGIN_ID_MAX_SUFFIX } from '@/lib/building';
+import { ensureBuildingSubscription } from '@/lib/building-plan';
 
 // =====================================================================================
 // 🛡️ ADMIN — OWNERS DIRECTORY
@@ -186,8 +187,9 @@ export async function POST(request: Request) {
     // warning telling them exactly what to finish by hand.
     const warnings: string[] = [];
     if (authRole === 'building_admin') {
+      const buildingId = crypto.randomUUID();
       const { error: buildingErr } = await supabaseAdminEngine.from('buildings').insert({
-        id: crypto.randomUUID(),
+        id: buildingId,
         admin_id: authUser.user.id,
         name: buildingName,
         // Stored as the admin wrote it ("12/A"). The identifier's own normalisation happens in
@@ -198,6 +200,17 @@ export async function POST(request: Request) {
       });
       if (buildingErr) {
         warnings.push(`The building record could not be created (${buildingErr.message}). Has ADD_BUILDINGS.sql been run?`);
+      } else {
+        // The commercial contract: created UNPAID with a pay-by window. Until it is paid the
+        // building has full access and a countdown; past the window it locks, and so do its flat
+        // owners. Best-effort like everything else here — a building with no contract row simply
+        // resolves as it did before this feature (perpetual), which is a safe place to land.
+        const contract = await ensureBuildingSubscription(buildingId, authUser.user.id);
+        if (!contract) {
+          warnings.push(
+            'The billing contract could not be created. The building will not be billed or locked until you set its plan up from the Buildings menu. Has ADD_BUILDING_PLANS.sql been run?'
+          );
+        }
       }
 
       // Without this row they resolve to the Free baseline and silently cap at 2 properties /

@@ -8,6 +8,7 @@ import { sendEmail } from '@/lib/email/brevo';
 import { planEvent as planEventEmail } from '@/lib/email/templates';
 import { resolveAppBaseUrl } from '@/lib/public-url';
 import { logEvent, describeError } from '@/lib/logger';
+import { buildingPlanState, type BuildingSubscriptionRow } from '@/lib/building-plan';
 
 // =====================================================================================
 // ⏰ CRON — subscription lifecycle notifications.
@@ -114,6 +115,195 @@ interface WouldSend {
   body: string;
 }
 
+// =====================================================================================
+// THE BUILDING PASS
+//
+// A second, independent sweep over building_subscriptions. It lives in this route rather than a
+// third cron entry because it is the same job — "tell people about their billing state before it
+// bites them" — and because one daily wake-up is cheaper than two.
+//
+// It is deliberately NOT folded into the owner loop above. Owners are keyed by owner_id off
+// subscription_history and classified from a tier expiry; buildings are keyed by building_id off
+// their own contract and have an event the owner lifecycle has no concept of (pay_due, the
+// countdown before a building that has never paid locks). Merging them would put two sets of
+// branches in one loop, each half-applicable.
+//
+// Idempotency is identical in shape: CLAIM the building_plan_events row first, and only a claim
+// that actually inserted earns a notification. `ref` is the date the event belongs to, so a
+// renewed term produces a genuinely new event instead of being swallowed forever.
+// =====================================================================================
+
+type BuildingEventKind = 'pay_due' | 'expiring_soon' | 'grace_started' | 'locked';
+
+interface BuildingWouldSend {
+  buildingId: string;
+  buildingName: string;
+  event: BuildingEventKind;
+  days: number;
+  ref: string;
+  alreadySent: boolean;
+  title: string;
+  body: string;
+}
+
+/** Which transition, if any, this building is in right now. Null means nothing to say today. */
+function classifyBuilding(
+  row: BuildingSubscriptionRow,
+): { kind: BuildingEventKind; ref: string; days: number } | null {
+  const state = buildingPlanState(row);
+
+  // A cancelled contract is an administrative act, not a billing event — the same reason an
+  // admin revoke is skipped in the owner pass. Someone has already had that conversation.
+  if (row.canceled_at) return null;
+
+  if (state.unpaidWindow) {
+    // Locked for non-payment, or still counting down: both hang off the pay-by date, so a
+    // building is told once that it is due and once that it has locked.
+    if (state.status === 'locked') {
+      return { kind: 'locked', ref: String(row.pay_by || ''), days: 0 };
+    }
+    return { kind: 'pay_due', ref: String(row.pay_by || ''), days: state.daysToPay ?? 0 };
+  }
+  if (state.status === 'locked') {
+    return { kind: 'locked', ref: String(row.expiry_date || ''), days: 0 };
+  }
+  if (state.status === 'grace') {
+    return { kind: 'grace_started', ref: String(row.expiry_date || ''), days: state.daysLeftInGrace ?? 0 };
+  }
+  if (state.warnExpiringSoon) {
+    return { kind: 'expiring_soon', ref: String(row.expiry_date || ''), days: state.daysUntilExpiry ?? 0 };
+  }
+  return null;
+}
+
+/** Fixed, quotable copy — see the note in lib/notify.ts about push text and notice-i18n.ts. */
+function buildingMessageFor(kind: BuildingEventKind, name: string, days: number): { title: string; body: string } {
+  const plural = (n: number) => (n === 1 ? '' : 's');
+  switch (kind) {
+    case 'pay_due':
+      return {
+        title: 'Payment due for your building plan',
+        body: `${name} has ${days} day${plural(days)} left to pay. After that, management is locked for you and your flat owners.`,
+      };
+    case 'expiring_soon':
+      return {
+        title: 'Your building plan is expiring',
+        body: `${name}'s plan expires in ${days} day${plural(days)}. Request a renewal from your Plan tab.`,
+      };
+    case 'grace_started':
+      return {
+        title: 'Your building plan has expired',
+        body: `${name}'s plan has expired. ${days} day${plural(days)} of grace left to renew before management is locked.`,
+      };
+    case 'locked':
+      return {
+        title: 'Your building plan is locked',
+        body: `${name} is now read-only for you and your flat owners. Renew from your Plan tab to restore access.`,
+      };
+  }
+}
+
+async function runBuildingPass(dryRun: boolean) {
+  const summary = { buildings: 0, pay_due: 0, expiring_soon: 0, grace_started: 0, locked: 0, failed: 0 };
+  const would: BuildingWouldSend[] = [];
+  let skipped = 0;
+
+  // A missing table (ADD_BUILDING_PLANS.sql unrun) must not take the owner pass down with it —
+  // that half of the job is live and unrelated.
+  let rows: BuildingSubscriptionRow[] = [];
+  try {
+    const { data, error } = await supabaseAdminEngine.from('building_subscriptions').select('*');
+    if (error) throw error;
+    rows = (data || []) as BuildingSubscriptionRow[];
+  } catch {
+    return { summary, would, skipped };
+  }
+
+  // One lookup for every name, rather than one per building inside the loop.
+  const names = new Map<string, string>();
+  try {
+    const { data } = await supabaseAdminEngine.from('buildings').select('id, name');
+    (data || []).forEach((b: any) => names.set(b.id, b.name || 'Your building'));
+  } catch {
+    /* a nameless building still gets told; the copy just says "Your building" */
+  }
+
+  for (const row of rows) {
+    try {
+      const hit = classifyBuilding(row);
+      if (!hit) continue;
+      summary.buildings += 1;
+      summary[hit.kind] += 1;
+
+      const name = names.get(row.building_id) || 'Your building';
+      const msg = buildingMessageFor(hit.kind, name, hit.days);
+
+      if (dryRun) {
+        const { data: seen } = await supabaseAdminEngine
+          .from('building_plan_events')
+          .select('id')
+          .eq('building_id', row.building_id)
+          .eq('event', hit.kind)
+          .eq('ref', hit.ref)
+          .maybeSingle();
+        if (seen) skipped += 1;
+        would.push({
+          buildingId: row.building_id,
+          buildingName: name,
+          event: hit.kind,
+          days: hit.days,
+          ref: hit.ref,
+          alreadySent: !!seen,
+          title: msg.title,
+          body: msg.body,
+        });
+        continue;
+      }
+
+      // Claim first. Only a row that did not already exist earns a notification.
+      const { data: claimed, error: claimErr } = await supabaseAdminEngine
+        .from('building_plan_events')
+        .upsert(
+          {
+            id: crypto.randomUUID(),
+            building_id: row.building_id,
+            admin_id: row.admin_id,
+            event: hit.kind,
+            ref: hit.ref,
+          },
+          { onConflict: 'building_id,event,ref', ignoreDuplicates: true },
+        )
+        .select('id');
+      if (claimErr) throw claimErr;
+      if (!claimed || claimed.length === 0) {
+        skipped += 1;
+        summary.buildings -= 1;
+        summary[hit.kind] -= 1;
+        continue;
+      }
+
+      await notifyOwner({
+        userId: row.admin_id,
+        title: msg.title,
+        body: msg.body,
+        url: '/building#plan',
+        tag: `building-plan-${hit.kind}-${row.building_id}`,
+      });
+    } catch (err) {
+      summary.failed += 1;
+      await logEvent({
+        source: 'cron',
+        message: `Building plan check failed for ${row.building_id}`,
+        detail: describeError(err).detail,
+        route: '/api/cron/subscriptions',
+        context: { buildingId: row.building_id },
+      });
+    }
+  }
+
+  return { summary, would, skipped };
+}
+
 async function run(request: NextRequest) {
   if (!authorized(request)) {
     return NextResponse.json({ success: false, error: 'Unauthorized.' }, { status: 401 });
@@ -151,7 +341,32 @@ async function run(request: NextRequest) {
     return NextResponse.json({ success: false, error: 'Could not list owners.' }, { status: 500 });
   }
 
-  const ownerIds = Array.from(new Set((rows || []).map((r: { owner_id: string }) => r.owner_id).filter(Boolean)));
+  // ⚠️ Building admins are excluded from the OWNER pass, and this is not an optimisation.
+  //
+  // A building admin holds a subscription_history row for the whole_building tier, so they turn
+  // up in the list above like any owner. But resolveOwnerSubscription() now overlays their
+  // BUILDING CONTRACT onto that plan, so classify() would read the contract's expiry and fire an
+  // owner-worded "your plan expires in N days" — on top of the building-worded one the pass
+  // below sends off the same date. Two notifications, two dedupe tables, one event.
+  //
+  // The building pass owns every message about a building's billing state. Skipping them here is
+  // what keeps that true. Best-effort: if this lookup fails we skip nobody, which restores the
+  // old (pre-contract) behaviour rather than silencing the owner pass entirely.
+  const buildingAdminIds = new Set<string>();
+  try {
+    const { data: contracts } = await supabaseAdminEngine
+      .from('building_subscriptions')
+      .select('admin_id');
+    (contracts || []).forEach((c: { admin_id: string }) => {
+      if (c.admin_id) buildingAdminIds.add(c.admin_id);
+    });
+  } catch {
+    /* table not created yet — nothing to exclude, which is exactly how this ran before */
+  }
+
+  const ownerIds = Array.from(
+    new Set((rows || []).map((r: { owner_id: string }) => r.owner_id).filter(Boolean)),
+  ).filter((id) => !buildingAdminIds.has(id));
 
   for (const ownerId of ownerIds) {
     summary.owners++;
@@ -262,6 +477,9 @@ async function run(request: NextRequest) {
     }
   }
 
+  // The building contracts, swept independently — see the header above runBuildingPass().
+  const buildings = await runBuildingPass(dryRun);
+
   if (dryRun) {
     return NextResponse.json(
       {
@@ -276,6 +494,10 @@ async function run(request: NextRequest) {
           failed: summary.failed,
         },
         would,
+        buildings: {
+          counts: { ...buildings.summary, alreadySent: buildings.skipped },
+          would: buildings.would,
+        },
       },
       { status: 200, headers: { 'Cache-Control': 'no-store' } },
     );
@@ -294,7 +516,10 @@ async function run(request: NextRequest) {
     /* the table may not exist yet (ADD_APP_LOGS.sql unrun) — never fail the run over cleanup */
   }
 
-  return NextResponse.json({ success: true, ...summary, logsPurged: purged }, { status: 200 });
+  return NextResponse.json(
+    { success: true, ...summary, buildings: buildings.summary, logsPurged: purged },
+    { status: 200 },
+  );
 }
 
 // Vercel Cron issues a GET; POST supported for manual triggering.

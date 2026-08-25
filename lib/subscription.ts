@@ -1,5 +1,6 @@
 import { supabaseAdminEngine } from './supabase-server';
 import { buildingMembershipOf, BUILDING_ADMIN_ROLE } from './building';
+import { buildingPlanOf, buildingPlanState } from './building-plan';
 
 // =====================================================================================
 // 📦 SUBSCRIPTION LIFECYCLE — single source of truth for owner plan enforcement.
@@ -53,6 +54,15 @@ export interface OwnerSubscription {
    * that a downgrade notification is due.
    */
   downgradedFrom: { tierId: string; tierName: string; endedAt: string | null } | null;
+  /**
+   * Whole Building only: the account has never paid and is still inside its pay-by window.
+   * Full access, with a countdown — see lib/building-plan.ts.
+   */
+  unpaidWindow?: boolean;
+  /** Whole Building only: days left to pay before the initial lock. */
+  daysToPay?: number | null;
+  /** Whole Building only: the pay-by deadline, so the UI can name the date, not just the count. */
+  payBy?: string | null;
 }
 
 // "Free" here means the perpetual Free baseline, not merely "costs nothing". A tier that
@@ -164,14 +174,19 @@ function freeState(
 }
 
 /**
- * Resolve an account's OWN subscription state, ignoring any building it belongs to.
+ * Resolve an account's OWN TIER state, from subscription_history alone. Ignores both the
+ * building an owner may belong to and the contract a building admin may run.
  * Never throws for "no plan" — a planless owner resolves to a perpetual Free state.
  *
- * Private: everything outside this file calls resolveOwnerSubscription() below, which layers
- * the Whole Building substitution on top. Keeping this one separate is also what makes the
- * substitution non-recursive — it resolves the building admin through THIS function.
+ * Private, and the innermost of three layers:
+ *   resolveOwnSubscriptionBase  — the tier and its expiry (this function)
+ *   resolveOwnSubscription      — + the building's own commercial contract, if it runs one
+ *   resolveOwnerSubscription    — + the building plan a flat owner inherits
+ * Keeping them separate is what makes the substitution non-recursive: a flat owner's building
+ * admin is resolved through the MIDDLE layer, so they inherit the contract but not another
+ * round of membership lookup.
  */
-async function resolveOwnSubscription(ownerId: string): Promise<OwnerSubscription> {
+async function resolveOwnSubscriptionBase(ownerId: string): Promise<OwnerSubscription> {
   // Admin-controlled hard revoke flag lives in auth user_metadata.
   let permissionsRevoked = false;
   try {
@@ -306,6 +321,53 @@ async function resolveOwnSubscription(ownerId: string): Promise<OwnerSubscriptio
     lockReason,
     downgradedFrom: null, // still on the plan — grace is not a downgrade
   };
+}
+
+/**
+ * The account's own subscription, with its Whole Building CONTRACT overlaid if it runs one.
+ *
+ * A building admin sits on the `whole_building` tier, which is priced 0 with billing_interval
+ * 'custom' and therefore resolves through the FREE path above: perpetual, unlimited, and unable
+ * to expire. That is still the right base — the tier is what decides which modules are bundled
+ * and that the limits are unlimited. What it cannot express is the building's commercial
+ * contract, which is per-building, yearly by default, and negotiated offline.
+ *
+ * So the contract is layered on top rather than modelled as a tier. buildingPlanState() supplies
+ * the lifecycle fields only; tierId, tierName and limits are deliberately untouched, so a locked
+ * building keeps its identity and its bundled modules and simply cannot write.
+ *
+ * Two consequences worth being explicit about, because both are the point rather than side
+ * effects:
+ *   * assertOwnerCanWrite() gates building admins already (PLAN_GOVERNED_ROLES), so this one
+ *     overlay locks them at every one of the ~50 routes that guard, with no per-route change.
+ *   * resolveOwnerSubscription() substitutes this result into every flat owner under the
+ *     building, status and lockReason included — so an unpaid building takes its owners
+ *     read-only with it. That is the agreed scope: the building is the paying customer.
+ *
+ * permissions_revoked still outranks the contract. An admin revoke is a deliberate act against
+ * one account and must keep reading as 'revoked', not be relabelled as a lapsed bill.
+ *
+ * Fails open on absolutely everything: no contract row, an unrun migration, a PostgREST error —
+ * all return the base resolution, which is exactly how every building behaved before this
+ * feature. A bug here that failed closed would lock paying customers out of their own data.
+ */
+async function resolveOwnSubscription(ownerId: string): Promise<OwnerSubscription> {
+  const base = await resolveOwnSubscriptionBase(ownerId);
+
+  try {
+    const contract = await buildingPlanOf(ownerId);
+    if (!contract) return base;
+
+    const state = buildingPlanState(contract);
+
+    // An admin revoke is not a billing event and is not softened by one.
+    if (base.permissionsRevoked) {
+      return { ...base, ...state, status: 'locked', lockReason: 'revoked' };
+    }
+    return { ...base, ...state };
+  } catch {
+    return base;
+  }
 }
 
 /**

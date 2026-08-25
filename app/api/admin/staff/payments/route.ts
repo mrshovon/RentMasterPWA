@@ -103,10 +103,17 @@ export async function POST(request: NextRequest) {
     try {
       const { data: staffRow } = await supabaseAdminEngine
         .from('staff')
-        .select('property_id')
+        .select('property_id, name, designation')
         .eq('id', staffId)
         .eq('owner_id', uid)
         .maybeSingle();
+      // Name WHO was paid on the ledger row. The category alone is 'Salary' for everyone, so a
+      // month with several staff reads as an undifferentiated column. Every part is optional —
+      // an owner who never filled in a designation still gets a usable "Md Karim · July salary".
+      const paidTo = [staffRow?.name, staffRow?.designation, note]
+        .map((part) => String(part || '').trim())
+        .filter(Boolean)
+        .join(' · ');
       await bookAutoTransaction(uid, {
         direction: 'expense',
         amount,
@@ -115,6 +122,7 @@ export async function POST(request: NextRequest) {
         txnDate: paidOn,
         source: 'staff_salary',
         sourceRef: row.id,
+        note: paidTo || null,
       });
     } catch (acctErr) {
       console.error('[staff/payments] accounts automation failed (non-fatal):', acctErr);
