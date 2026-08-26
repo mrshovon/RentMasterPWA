@@ -51,7 +51,12 @@ export async function GET(request: NextRequest) {
       // shapeSubmission decrypts sender_msisdn / txn_id, which the admin reconciles by eye
       // against the bKash statement. See lib/payments/submissions.ts.
       ...shapeSubmission(r),
-      owner: ownerById[r.owner_id] || null,
+      // A submission now OUTLIVES the owner who made it — lib/account-purge.ts keeps
+      // payment_submissions for audit — so ownerById has no entry once the auth user is gone.
+      // Fall back to the email snapshotted at submit time, and say plainly that the account is
+      // gone: an audit row that cannot name its payer is not an audit row.
+      owner: ownerById[r.owner_id]
+        || { name: null, email: r.owner_email || null, phone: null, deleted: true },
       tier_name: tierNameById[r.tier_id] || r.tier_id,
     }));
 

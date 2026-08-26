@@ -5,6 +5,7 @@ import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { apiError } from '@/lib/api-response';
 import { notifyOwner } from '@/lib/notify';
 import { itemsFrom, planForBuilding, addMonths, today } from '@/lib/building-plan';
+import { missingColumnFrom } from '@/lib/plan-addons';
 
 // =====================================================================================
 // 👑 SUPER ADMIN — RAISE A PLAN INVOICE FOR A BUILDING
@@ -96,11 +97,24 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const send = body.send !== false;
     const invoiceId = crypto.randomUUID();
 
-    const { data: invoice, error } = await supabaseAdminEngine
-      .from('building_plan_invoices')
-      .insert([{
+    // Identity snapshot. This invoice now OUTLIVES its building — ADD_DELETION_AUDIT.sql drops
+    // the cascade so a deleted building's payment record survives for audit — and once the
+    // buildings row is gone there is nothing left to join to for a name. Same reasoning as
+    // payment_submissions.owner_email. Best-effort on the email: a missing one is a blank column,
+    // never a failed invoice.
+    let adminEmail: string | null = null;
+    try {
+      const { data: adminUser } = await supabaseAdminEngine.auth.admin.getUserById(building.admin_id);
+      adminEmail = adminUser?.user?.email || null;
+    } catch {
+      /* non-fatal — building_name alone still identifies the counterparty */
+    }
+
+    const row: Record<string, unknown> = {
         id: invoiceId,
         building_id: buildingId,
+        building_name: building.name,
+        admin_email: adminEmail,
         admin_id: building.admin_id,
         kind,
         term_months: termMonths,
@@ -115,9 +129,32 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         issued_at: send ? new Date().toISOString() : null,
         due_on: dueOn,
         note: String(body.note ?? '').trim().slice(0, 2000) || null,
-      }])
+    };
+
+    let { data: invoice, error } = await supabaseAdminEngine
+      .from('building_plan_invoices')
+      .insert([row])
       .select('*')
       .single();
+
+    // Pre-migration grace, same shape as /api/super-admin/tiers: retry without the snapshot
+    // columns when ADD_DELETION_AUDIT.sql has not been run yet, so raising an invoice never
+    // depends on a migration — and say loudly what needs running, because until it does the
+    // cascade this snapshot exists for is still live.
+    if (['PGRST204', '42703'].includes(error?.code || '')) {
+      const missing = missingColumnFrom(error?.message, row);
+      if (missing.length) {
+        console.error(`[building-plan-invoice] building_plan_invoices is missing ${missing.join(', ')} — run ADD_DELETION_AUDIT.sql. Raising the invoice without ${missing.length === 1 ? 'it' : 'them'}.`);
+        const retry = { ...row };
+        for (const col of missing) delete retry[col];
+        ({ data: invoice, error } = await supabaseAdminEngine
+          .from('building_plan_invoices')
+          .insert([retry])
+          .select('*')
+          .single());
+      }
+    }
+
     if (error) throw error;
 
     const { error: itemErr } = await supabaseAdminEngine

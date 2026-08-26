@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { apiError } from '@/lib/api-response';
-import { buildingMembershipOf } from '@/lib/building';
+import { buildingMembershipOf, BUILDING_SELECT, type BuildingRow } from '@/lib/building';
 import { INVOICE_SELECT } from '@/lib/building-billing';
 
 // =====================================================================================
@@ -17,6 +17,13 @@ import { INVOICE_SELECT } from '@/lib/building-billing';
 //
 // The route is deliberately not gated on requireBuildingAdmin: its caller is an ordinary owner.
 // Membership IS the authorisation, and every query below is filtered by the caller's uid.
+//
+// The payload also carries the building's PRINTABLE IDENTITY — address, letterhead, signatory and
+// the building admin's signature image — because a flat owner can now print their own service
+// charge receipt and statement, and an unsigned receipt is not proof of anything. That is the
+// same downward exposure /api/admin/tenants/me already does with the owner's signature so a
+// tenant's copy of a rent receipt is signed. Nothing private travels with it: a letterhead and a
+// signature are what the building puts on paper it hands out.
 // =====================================================================================
 
 function ownerId(request: NextRequest): string | null {
@@ -72,6 +79,38 @@ export async function GET(request: NextRequest) {
 
     const shaped = (invoices || []).map((i: any) => ({ ...i, payments: byInvoice[String(i.id)] || [] }));
 
+    // --- The printable identity ------------------------------------------------------------
+    // Both lookups are best-effort and independent. A receipt with no letterhead, or with the
+    // rule and no signature image on it, is still a usable receipt; a 500 here would take away a
+    // screen that worked before, over a decoration.
+    let buildingRow: BuildingRow | null = null;
+    try {
+      const { data } = await supabaseAdminEngine
+        .from('buildings')
+        .select(BUILDING_SELECT)
+        .eq('id', membership.buildingId)
+        .maybeSingle();
+      buildingRow = (data as BuildingRow) || null;
+    } catch {
+      /* non-fatal — the receipt falls back to the building's name alone */
+    }
+
+    // The signature lives on the BUILDING ADMIN's auth user_metadata, not on the buildings row
+    // (ADD_BUILDINGS.sql:46 says why) — so it is fetched by uid, exactly as
+    // /api/admin/owner/signature reads it.
+    let signatureUrl: string | null = null;
+    let ownerName: string | null = null;
+    try {
+      const [adminRes, selfRes] = await Promise.all([
+        supabaseAdminEngine.auth.admin.getUserById(membership.adminId),
+        supabaseAdminEngine.auth.admin.getUserById(uid),
+      ]);
+      signatureUrl = ((adminRes?.data?.user?.user_metadata as any) || {}).signature_url || null;
+      ownerName = ((selfRes?.data?.user?.user_metadata as any) || {}).name || null;
+    } catch {
+      /* non-fatal — an unsigned receipt, and the flat label identifies the owner */
+    }
+
     return NextResponse.json(
       {
         success: true,
@@ -79,7 +118,14 @@ export async function GET(request: NextRequest) {
           id: membership.buildingId,
           name: membership.buildingName,
           unitLabel: membership.unitLabel,
+          address: buildingRow?.address ?? null,
+          city: buildingRow?.city ?? null,
+          letterheadUrl: buildingRow?.letterhead_url ?? null,
+          signatoryName: buildingRow?.signatory_name ?? null,
+          signatoryTitle: buildingRow?.signatory_title ?? null,
+          signatureUrl,
         },
+        owner: { name: ownerName },
         count: shaped.length,
         data: shaped,
       },

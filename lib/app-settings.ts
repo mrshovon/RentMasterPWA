@@ -234,3 +234,72 @@ export const DEFAULT_BREVO_CONFIG: BrevoConfig = {
 };
 
 export const getBrevoConfig = () => getSetting<BrevoConfig>('brevo_config', DEFAULT_BREVO_CONFIG);
+
+// -------------------------------------------------------------------------------------
+// LEGAL DOCUMENTS — admin-editable Terms and Privacy Policy.
+//
+// The authored markdown in ../legal/ is compiled into the frontend at build time
+// (scripts/build-legal.mjs -> content/legal/generated.ts) and stays the BUILT-IN FALLBACK. What
+// is stored here is an override: saved markdown that the public pages render instead. Nothing is
+// stored until an admin saves, and clearing a key restores the compiled text.
+//
+// The fallback is the whole safety design. Google Play requires the privacy URL to resolve, and
+// a settings hiccup must never leave /privacy or /terms with nothing to show — so a missing row,
+// a failed read and an empty string all mean "use the compiled document", never an error page.
+//
+// ONE KEY PER DOCUMENT AND LANGUAGE rather than one blob: the Bangla Terms alone are 62 KB, and
+// a public page should fetch only the edition it is about to render.
+//
+// The markdown is stored RAW and parsed in the browser by lib/legal-markdown.mjs — the same
+// functions that produced the compiled fallback. The backend deliberately does not parse: a
+// second parser here is how the saved text and the compiled text would come to render
+// differently, which for a legal document is the one failure that matters.
+// -------------------------------------------------------------------------------------
+export type LegalDocName = 'privacy' | 'terms';
+export type LegalLang = 'en' | 'bn';
+
+export const LEGAL_DOC_NAMES: LegalDocName[] = ['privacy', 'terms'];
+export const LEGAL_LANGS: LegalLang[] = ['en', 'bn'];
+
+/** Guards against an arbitrary settings key being reachable through a query parameter. */
+export function legalSettingKey(doc: LegalDocName, lang: LegalLang): string {
+  return `legal_${doc}_${lang}`;
+}
+
+export interface LegalDocSetting {
+  /** The admin's markdown. '' means "no override" — fall back to the compiled document. */
+  markdown: string;
+  /** ISO 8601, stamped server-side on every save. '' when never saved. */
+  updatedAt: string;
+}
+
+export const DEFAULT_LEGAL_DOC: LegalDocSetting = { markdown: '', updatedAt: '' };
+
+export const getLegalDoc = (doc: LegalDocName, lang: LegalLang) =>
+  getSetting<LegalDocSetting>(legalSettingKey(doc, lang), DEFAULT_LEGAL_DOC);
+
+/**
+ * Publish (or clear) one document. `markdown` of '' clears the override.
+ *
+ * A size ceiling is enforced by the caller, not here — see the route. These documents are tens of
+ * kilobytes by nature, so the usual short-string caps elsewhere in this file do not apply.
+ */
+export const setLegalDoc = (doc: LegalDocName, lang: LegalLang, markdown: string) =>
+  setSetting(legalSettingKey(doc, lang), {
+    markdown,
+    updatedAt: markdown ? new Date().toISOString() : '',
+  } satisfies LegalDocSetting);
+
+/**
+ * The counterpart getTermsVersion() never had.
+ *
+ * Until now nothing in either repo wrote `terms_version` — it could only be changed by hand-run
+ * SQL, which is why the recorded edition has always been the hardcoded default. Editing the Terms
+ * without being able to stamp a new effective date would leave every consent record pointing at
+ * a version whose wording had silently changed underneath it.
+ *
+ * Empty restores DEFAULT_TERMS_VERSION rather than storing a blank, because a blank version on a
+ * consent row is worse than a stale one.
+ */
+export const setTermsVersion = (version: string) =>
+  setSetting('terms_version', { version: (version || '').trim() || DEFAULT_TERMS_VERSION });

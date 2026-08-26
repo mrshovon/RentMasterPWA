@@ -4,7 +4,8 @@ import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { logPasswordReset, notifyPasswordChanged, clientIpFrom } from '@/lib/password-reset-log';
 import { getPresenceFor } from '@/lib/presence';
 import { apiError } from '@/lib/api-response';
-import { ownedBuilding, buildingMembershipOf, countActiveBuildingOwners } from '@/lib/building';
+import { ownedBuilding, buildingMembershipOf, countActiveBuildingOwners, buildingOwnerIds, forgetBuildingMembership } from '@/lib/building';
+import { purgeOwnerAccount } from '@/lib/account-purge';
 
 // =====================================================================================
 // 🛡️ ADMIN — SINGLE OWNER
@@ -218,54 +219,26 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   }
 }
 
+
 // =====================================================================================
-// DELETE — remove an owner and everything they own.
+// DELETE — remove an account and everything about it, EXCEPT money paid to Bari360.
 //
-// This used to be four lines: `auth.admin.deleteUser(id)` then a fire-and-forget
-// `user_profiles` delete. It did not work, and worse, it *reported* that it did:
+// The cascade itself now lives in lib/account-purge.ts, because this route may have to run it
+// more than once: deleting a building admin can take every flat owner on its roster with it.
+// That file also carries the history of why a four-line delete was never enough, and the list of
+// tables that are deliberately preserved.
 //
-//   1. FK deadlock. `tenants.owner_id` and `properties.owner_id` reference
-//      `user_profiles (id)` with no ON DELETE clause (see FIX_PUSH_AND_TENANT_MOVE.sql),
-//      i.e. NO ACTION. Deleting the auth user cascades into user_profiles and trips those
-//      FKs, so GoTrue aborts with "Database error deleting user" for any owner who has
-//      data — which is every real owner.
-//   2. The `user_profiles` delete result was discarded, so a failure there still returned
-//      `success: true` / "Owner account deleted."
-//   3. Nothing cleaned up the owner's rows. Several tables (staff, reminders,
-//      contact_messages, notices.target_owner_id, device_tokens.user_id) are deliberately
-//      NOT foreign keys — see ADD_STAFF.sql — so they would silently orphan against a
-//      dead uuid rather than raise.
-//
-// So: delete children before parents, check every error, and only then remove the auth
-// user. Tables belonging to modules whose migration has not been run yet are skipped
-// rather than fatal (MIGRATIONS.md still lists several as unapplied), the same spirit as
-// the 42703 fallback in /api/admin/notices.
+// TWO THINGS THIS ROUTE DECIDES, which the purge module does not:
+//   1. WHO gets purged — just this account, or the whole building beneath it.
+//   2. Whether it is allowed at all (self-delete, last administrator).
 // =====================================================================================
 
-// "This table/column isn't in the schema" — an optional module whose migration was never
-// run. Nothing to delete, so skipping is correct.
-//
-// PGRST205/PGRST204 are what actually come back: supabase-js talks to PostgREST, which
-// resolves names against its own schema cache and answers with its own codes rather than
-// Postgres's 42P01/42703. Both sets are listed because only the PGRST ones are observed in
-// practice, and missing either would turn "module not installed" into a hard delete failure.
-const MISSING_SCHEMA_CODES = ['PGRST205', 'PGRST204', '42P01', '42703'];
+/** The two answers to "this building still has owners attached". */
+type MembersMode = 'delete' | 'detach';
 
-interface PurgeStep { table: string; column: string; values: string[] }
-
-/**
- * Delete `table` rows whose `column` is in `values`. Returns the step outcome instead of
- * throwing so the caller can report exactly which table failed.
- */
-async function purge({ table, column, values }: PurgeStep): Promise<{ skipped: boolean; error?: string }> {
-  if (!values.length) return { skipped: true };
-  const { error } = await supabaseAdminEngine.from(table).delete().in(column, values);
-  if (!error) return { skipped: false };
-  if (MISSING_SCHEMA_CODES.includes(error.code || '')) {
-    console.warn(`[owner-delete] skipping ${table}.${column} — not in the schema (${error.code}). Unapplied migration?`);
-    return { skipped: true };
-  }
-  return { skipped: false, error: `${table}.${column}: ${error.message}` };
+function membersModeFrom(request: NextRequest): MembersMode | null {
+  const raw = request.nextUrl.searchParams.get('members');
+  return raw === 'delete' || raw === 'detach' ? raw : null;
 }
 
 export async function DELETE(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -301,103 +274,80 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
       }
     }
 
-    // A building admin still holding owners must not be deleted out from under them: those
-    // owners' plans resolve through this account, so removing it silently drops every one of
-    // them back to the Free limits. Detach them first, deliberately.
+    // --- A building admin still holding owners: ASK, do not refuse ----------------------
+    // This used to be a flat 409 telling the admin to detach everyone first, which meant a
+    // building could never actually be removed — there is no bulk detach, and each removal is a
+    // separate confirm. The choice is real either way, so it is now made explicitly:
+    //
+    //   detach  the building and everything it owns goes; each flat owner keeps their login and
+    //           their own properties/tenants, and falls back to the Free limits.
+    //   delete  every flat owner is purged too, as if each had been deleted on their own.
+    //
+    // Deliberately NOT defaulted server-side. Wiping other people's accounts as a side effect of
+    // an unrelated delete is exactly the kind of thing a missing query param must not decide.
     const targetBuilding = await ownedBuilding(id);
+    let memberIds: string[] = [];
+
     if (targetBuilding) {
-      const members = await countActiveBuildingOwners(targetBuilding.id);
-      if (members > 0) {
+      // activeOnly: false — countActiveBuildingOwners() counts only is_active rows, so a
+      // soft-detached owner would survive a "delete everything" and be silently left behind.
+      // The admin is filtered out in case a bad roster row lists them as their own member:
+      // without it the loop below would delete this account, then the code after it would try
+      // again and report a failure for work that had already succeeded.
+      memberIds = (await buildingOwnerIds(targetBuilding.id, false)).filter((m) => m !== id);
+      const mode = membersModeFrom(request);
+
+      if (memberIds.length && !mode) {
         return NextResponse.json(
           {
             success: false,
-            error: `"${targetBuilding.name}" still has ${members} owner${members === 1 ? '' : 's'} attached. Detach or delete them first — deleting this account would drop their plans to the free limits.`,
+            code: 'BUILDING_HAS_MEMBERS',
+            buildingName: targetBuilding.name,
+            memberCount: memberIds.length,
+            error: `"${targetBuilding.name}" still has ${memberIds.length} flat owner${memberIds.length === 1 ? '' : 's'} attached. Choose whether to delete their accounts too or detach them first.`,
           },
           { status: 409 }
         );
       }
+
+      if (mode === 'delete') {
+        // Members first: a failure part-way leaves the building itself intact, so the admin can
+        // read the error, fix the cause and press Delete again. Purging the admin first would
+        // leave orphaned members with no building to find them by.
+        for (const memberId of memberIds) {
+          const result = await purgeOwnerAccount(memberId);
+          if (!result.ok) {
+            return NextResponse.json(
+              {
+                success: false,
+                error: `Could not delete a flat owner in this building — ${result.error}. Nothing further was removed; every login still exists.`,
+              },
+              { status: 500 }
+            );
+          }
+          const { error: memberAuthErr } = await supabaseAdminEngine.auth.admin.deleteUser(memberId);
+          if (memberAuthErr) {
+            return NextResponse.json(
+              {
+                success: false,
+                error: `A flat owner's data was removed but their login could not be deleted: ${memberAuthErr.message}`,
+              },
+              { status: 500 }
+            );
+          }
+        }
+      }
+      // 'detach' needs no work of its own: deleting the buildings row below cascades
+      // building_owners away, and each member's plan resolves to Free on their next request.
     }
 
-    // --- Collect the id sets the child tables are keyed on -----------------------------
-    const { data: propRows, error: propErr } = await supabaseAdminEngine
-      .from('properties').select('id').eq('owner_id', id);
-    if (propErr) throw propErr;
-    const propertyIds = (propRows || []).map((p: { id: string }) => String(p.id));
-
-    const { data: tenantRows, error: tenantErr } = await supabaseAdminEngine
-      .from('tenants').select('id').eq('owner_id', id);
-    if (tenantErr) throw tenantErr;
-    const tenantIds = (tenantRows || []).map((t: { id: string }) => String(t.id));
-
-    // billing_payments hangs off the ledger, not the owner.
-    let ledgerIds: string[] = [];
-    const { data: ledgerRows, error: ledgerErr } = await supabaseAdminEngine
-      .from('billing_ledgers').select('id').eq('created_by_owner', id);
-    if (ledgerErr && !MISSING_SCHEMA_CODES.includes(ledgerErr.code || '')) throw ledgerErr;
-    if (ledgerRows) ledgerIds = ledgerRows.map((l: { id: string }) => String(l.id));
-
-    const owned = [id];
-
-    // --- The cascade, children first ---------------------------------------------------
-    // Order matters: anything with a real FK must go before its parent, and the auth user
-    // (which cascades into user_profiles) goes dead last.
-    const steps: PurgeStep[] = [
-      // Money: payments -> ledgers, then the bookkeeping module.
-      { table: 'billing_payments',           column: 'ledger_id',        values: ledgerIds },
-      { table: 'billing_ledgers',            column: 'created_by_owner', values: owned },
-      { table: 'account_transactions',       column: 'owner_id',         values: owned },
-      { table: 'account_transfers',          column: 'owner_id',         values: owned },
-      { table: 'accounts',                   column: 'owner_id',         values: owned },
-      // Staff module.
-      { table: 'staff_payments',             column: 'owner_id',         values: owned },
-      { table: 'staff',                      column: 'owner_id',         values: owned },
-      // Per-tenant and per-property records.
-      { table: 'reminders',                  column: 'owner_id',         values: owned },
-      { table: 'documents',                  column: 'tenant_id',        values: tenantIds },
-      { table: 'rent_revision_archives',     column: 'tenant_id',        values: tenantIds },
-      { table: 'service_charge_breakdowns',  column: 'property_id',      values: propertyIds },
-      { table: 'property_occupancy_history', column: 'property_id',      values: propertyIds },
-      { table: 'maintenance_logs',           column: 'property_id',      values: propertyIds },
-      // Notices: written by them, addressed to them, or addressed to one of their tenants.
-      { table: 'notices',                    column: 'sender_id',        values: owned },
-      { table: 'notices',                    column: 'target_owner_id',  values: owned },
-      { table: 'notices',                    column: 'target_tenant_id', values: tenantIds },
-      // Push endpoints are keyed by text user_id holding either an owner uid or a tenant id.
-      { table: 'device_tokens',              column: 'user_id',          values: [...owned, ...tenantIds] },
-      // Now the parents.
-      { table: 'tenants',                    column: 'owner_id',         values: owned },
-      { table: 'properties',                 column: 'owner_id',         values: owned },
-      // Account-level records.
-      { table: 'subscription_history',       column: 'owner_id',         values: owned },
-      { table: 'owner_addons',               column: 'owner_id',         values: owned },
-      { table: 'payment_submissions',        column: 'owner_id',         values: owned },
-      { table: 'support_tickets',            column: 'owner_id',         values: owned },
-      { table: 'contact_messages',           column: 'owner_id',         values: owned },
-      { table: 'password_reset_history',     column: 'owner_id',         values: owned },
-      // Whole Building. Children first: payments hang off invoices, invoices off the roster/owner,
-      // and the building is deleted last. `purge()` skips a table that does not exist yet via
-      // MISSING_SCHEMA_CODES, so these are safe to ship before the migrations have been run.
-      { table: 'building_service_payments',  column: 'owner_id',         values: owned },
-      { table: 'building_service_invoices',  column: 'owner_id',         values: owned },
-      { table: 'building_owners',            column: 'owner_id',         values: owned },
-      // The config lists and any invoices still hanging off the building are removed by its own
-      // `on delete cascade`, but the building row itself is deleted here.
-      { table: 'buildings',                  column: 'admin_id',         values: owned },
-      { table: 'user_profiles',              column: 'id',               values: owned },
-    ];
-
-    for (const step of steps) {
-      const { error } = await purge(step);
-      if (error) {
-        // Stop here rather than press on: a half-cascaded account is easier to reason
-        // about than one where an unknown subset survived, and the auth user still exists
-        // so the admin can retry once the cause is fixed.
-        console.error('[owner-delete] cascade failed at', error);
-        return NextResponse.json(
-          { success: false, error: `Could not delete the account — ${error}. Nothing further was removed; the login still exists.` },
-          { status: 500 }
-        );
-      }
+    // --- The cascade -------------------------------------------------------------------
+    const result = await purgeOwnerAccount(id);
+    if (!result.ok) {
+      return NextResponse.json(
+        { success: false, error: `Could not delete the account — ${result.error}. Nothing further was removed; the login still exists.` },
+        { status: 500 }
+      );
     }
 
     // --- Finally the login itself ------------------------------------------------------
@@ -410,10 +360,17 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
       );
     }
 
+    // The membership cache is per-instance and 60s long, so a detached owner would otherwise
+    // keep resolving through a building that no longer exists for up to a minute.
+    forgetBuildingMembership(id);
+    memberIds.forEach(forgetBuildingMembership);
+
     return NextResponse.json({
       success: true,
-      message: 'Owner account deleted.',
-      removed: { properties: propertyIds.length, tenants: tenantIds.length, invoices: ledgerIds.length },
+      message: memberIds.length && membersModeFrom(request) === 'delete'
+        ? `Account deleted, along with ${memberIds.length} flat owner${memberIds.length === 1 ? '' : 's'}.`
+        : 'Owner account deleted.',
+      removed: { ...result.removed, members: membersModeFrom(request) === 'delete' ? memberIds.length : 0 },
     });
   } catch (err) {
     return apiError(request, err);
