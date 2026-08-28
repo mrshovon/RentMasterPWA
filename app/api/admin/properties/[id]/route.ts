@@ -31,7 +31,7 @@ export async function PATCH(
     if (!itemGuard.ok) return NextResponse.json(itemGuard.body, { status: itemGuard.status });
 
     const body = await request.json();
-    const { name, address, flatNo, vacate, receiptName } = body;
+    const { name, address, flatNo, vacate, receiptName, isSelfOccupied } = body;
 
     // ---------------------------------------------------------------------------
     // MODE A — Vacate: snapshot each current occupant into property_occupancy_history,
@@ -67,6 +67,8 @@ export async function PATCH(
         if (archiveError) console.error('Occupancy archive warning:', archiveError.message);
       }
 
+      // is_self_occupied is deliberately NOT touched here. Vacating is about the TENANT leaving;
+      // whether the owner then lives in it themselves is a separate statement only they can make.
       const { data: vacated, error: vacateError } = await supabaseAdminEngine
         .from('properties')
         .update({ is_vacant: true })
@@ -102,6 +104,36 @@ export async function PATCH(
     if (flatNo !== undefined) updates.flat_no = flatNo;
     // Cleared back to null = fall back to the owner's account name on this property's receipts.
     if (receiptName !== undefined) updates.receipt_name = String(receiptName ?? '').trim() || null;
+
+    if (isSelfOccupied !== undefined) {
+      // Offered only on a flat that belongs to a building. Enforced here and not just in the UI:
+      // hiding a control is not a rule, and the flag changes what the tenant dropdowns offer.
+      const { data: flat } = await supabaseAdminEngine
+        .from('building_owner_flats')
+        .select('id')
+        .eq('owner_id', ownerId)
+        .eq('property_id', propertyId)
+        .maybeSingle();
+      if (!flat) {
+        return NextResponse.json(
+          { error: 'Only a flat inside a building can be marked as self-occupied.' },
+          { status: 400 },
+        );
+      }
+      // A property with a tenant in it is not one you live in. Refuse rather than silently
+      // detaching someone's tenancy.
+      const { count: tenantCount } = await supabaseAdminEngine
+        .from('tenants')
+        .select('id', { count: 'exact', head: true })
+        .eq('property_id', propertyId);
+      if (isSelfOccupied && (tenantCount || 0) > 0) {
+        return NextResponse.json(
+          { error: 'This flat has a tenant. Vacate it first, then mark it as self-occupied.' },
+          { status: 409 },
+        );
+      }
+      updates.is_self_occupied = !!isSelfOccupied;
+    }
 
     if (Object.keys(updates).length === 0) {
       return NextResponse.json({ error: 'No editable fields supplied.' }, { status: 400 });

@@ -184,9 +184,10 @@ export async function PATCH(
         if (freeError) console.error('Vacancy flag warning (vacated unit):', freeError.message);
       }
       if (updates.property_id) {
+        // Same as onboarding: moving a tenant IN means the owner is not living there.
         const { error: occupyError } = await supabaseAdminEngine
           .from('properties')
-          .update({ is_vacant: false })
+          .update({ is_vacant: false, is_self_occupied: false })
           .eq('id', updates.property_id)
           .eq('owner_id', ownerId);
         if (occupyError) console.error('Vacancy flag warning (occupied unit):', occupyError.message);

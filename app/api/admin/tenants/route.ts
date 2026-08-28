@@ -162,9 +162,13 @@ export async function POST(request: NextRequest) {
     }
 
     // 3. Side-Effect Automation Layer: Toggle unit state 'is_vacant' to false inside public.properties
+    //
+    // is_self_occupied is cleared in the same write: putting a tenant in a flat is the statement
+    // that you no longer live in it. Leaving it set would give the unit two contradictory states
+    // and make it read as self-occupied in every badge while a tenant paid rent on it.
     const { error: propertyUpdateError } = await supabaseAdminEngine
       .from('properties')
-      .update({ is_vacant: false })
+      .update({ is_vacant: false, is_self_occupied: false })
       .eq('id', propertyId)
       .eq('owner_id', ownerId);
 

@@ -26,7 +26,28 @@ export async function GET(request: NextRequest) {
       return apiError(request, fetchError);
     }
 
-    return NextResponse.json({ success: true, count: propertiesList.length, data: propertiesList }, { status: 200 });
+    // Which of these are flats in a Whole Building plan. Self-occupancy is offered only on those:
+    // a building flat is somewhere a person lives, and "I live here myself" is the case it exists
+    // for. One indexed lookup on owner_id, not a join — and it fails soft, because an owner with no
+    // building simply has none and a lookup failure must not take the property list down with it.
+    let flatPropertyIds = new Set<string>();
+    try {
+      const { data: flats } = await supabaseAdminEngine
+        .from('building_owner_flats')
+        .select('property_id')
+        .eq('owner_id', ownerId)
+        .not('property_id', 'is', null);
+      flatPropertyIds = new Set((flats || []).map((f: { property_id: string }) => String(f.property_id)));
+    } catch {
+      /* no building, or the table is not there yet — every property reads as not-a-flat */
+    }
+
+    const shaped = (propertiesList || []).map((p: any) => ({
+      ...p,
+      is_building_flat: flatPropertyIds.has(String(p.id)),
+    }));
+
+    return NextResponse.json({ success: true, count: shaped.length, data: shaped }, { status: 200 });
 
   } catch (runtimeExceptionCatch) {
     return apiError(request, runtimeExceptionCatch);

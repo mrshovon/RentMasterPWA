@@ -74,6 +74,7 @@ declare
   v_flats    bigint;
   v_orphans  bigint;
   v_unlinked bigint;
+  v_noprop   bigint;
 begin
   if to_regclass('public.building_owners') is null
      or to_regclass('public.building_service_invoices') is null then
@@ -230,11 +231,24 @@ begin
   select count(*) into v_flats    from public.building_owner_flats;
   select count(*) into v_orphans  from public.building_owner_flats where not is_active and not is_primary;
   select count(*) into v_unlinked from public.building_service_invoices where flat_id is null;
+  -- ⚠️ THE BACKFILL ABOVE DOES NOT CREATE PROPERTIES. Property creation lives in
+  -- lib/building-flats.ts, so only flats added through the API get the rentable unit behind them —
+  -- and a flat with no unit is INVISIBLE in the owner's dashboard, which lists properties and never
+  -- consults this table. This count is how you see that; the original version of this file did not
+  -- report it, and the gap went unnoticed until an owner asked where their other flat had gone.
+  -- Fix it by running REPAIR_BUILDING_FLAT_PROPERTIES.sql.
+  select count(*) into v_noprop
+    from public.building_owner_flats
+   where property_id is null and is_active and unit_label is not null;
 
-  raise notice 'ADD_BUILDING_OWNER_FLATS: applied. roster=%, flats=% (of which % historical/detached), invoices still unlinked=% (must be 0).',
-    v_roster, v_flats, v_orphans, v_unlinked;
+  raise notice 'ADD_BUILDING_OWNER_FLATS: applied. roster=%, flats=% (of which % historical/detached), invoices still unlinked=% (must be 0), flats with no rentable unit=%.',
+    v_roster, v_flats, v_orphans, v_unlinked, v_noprop;
 
   if v_unlinked > 0 then
     raise notice '  ^^ NOT ZERO. Do not run FINALIZE_BUILDING_FLAT_INVOICES.sql until it is. Investigate before deploying.';
+  end if;
+
+  if v_noprop > 0 then
+    raise notice '  ^^ % flat(s) have no rentable unit and will not appear in their owner dashboard. Run REPAIR_BUILDING_FLAT_PROPERTIES.sql.', v_noprop;
   end if;
 end $$;
