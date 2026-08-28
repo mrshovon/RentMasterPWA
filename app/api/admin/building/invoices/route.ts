@@ -4,7 +4,7 @@ import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { assertOwnerCanWrite } from '@/lib/subscription';
 import { sendPushToUsers } from '@/lib/push-send';
 import { apiError } from '@/lib/api-response';
-import { requireBuildingAdmin, ownerInBuilding } from '@/lib/building';
+import { requireBuildingAdmin, ownerInBuilding, buildingFlats, buildingOwnerIds, flatsOfOwner } from '@/lib/building';
 import { INVOICE_SELECT, invoiceAmountsFrom, normalizeBillingMonth } from '@/lib/building-billing';
 
 // =====================================================================================
@@ -67,43 +67,62 @@ export async function POST(request: NextRequest) {
 
     // ---- Generate the whole month -------------------------------------------------------
     if (body.generateAll) {
-      const { data: roster, error: rosterErr } = await supabaseAdminEngine
-        .from('building_owners')
-        .select('owner_id, default_service_charge')
-        .eq('building_id', buildingId)
-        .eq('is_active', true);
-      if (rosterErr) throw rosterErr;
+      // ONE INVOICE PER FLAT. An owner who holds three flats is billed three times, so that 3B can
+      // be settled while 4A is still owed — the whole reason flats exist as rows.
+      //
+      // buildingFlats() THROWS on a query failure rather than reading as "no flats". That matters:
+      // a best-effort empty list here would report "everyone is already billed" and the admin would
+      // believe a whole month had been issued when nothing had. Loud beats silent.
+      const flats = await buildingFlats(buildingId, true);
 
-      // Skip anyone already billed for the month rather than relying on the unique index to
-      // reject them: a partial insert would leave the admin unsure who actually got billed.
+      // Two independent filters on purpose. is_active is the flat's own state; the live roster is
+      // the person's. A detached owner keeps inactive historical flats (ADD_BUILDING_OWNER_FLATS
+      // backfills them), and neither filter alone would reliably keep those out of a billing run.
+      const onRoster = new Set(await buildingOwnerIds(buildingId, true));
+      const billable = flats.filter((f) => onRoster.has(f.owner_id));
+
+      // Skip what is already billed rather than relying on the unique index to reject it: a partial
+      // insert would leave the admin unsure who actually got billed.
       const { data: existing } = await supabaseAdminEngine
         .from('building_service_invoices')
-        .select('owner_id')
+        .select('flat_id, owner_id')
         .eq('building_id', buildingId)
         .eq('billing_month', billingMonth);
-      const already = new Set((existing || []).map((r: { owner_id: string }) => String(r.owner_id)));
 
-      const toCreate = (roster || []).filter((r: any) => !already.has(String(r.owner_id)));
+      const already = new Set((existing || []).map((r: any) => String(r.flat_id || '')).filter(Boolean));
+      // Belt for the rollout window: an invoice written by an instance predating the flats deploy
+      // has no flat_id, and re-billing that owner would double-charge them.
+      const legacyOwners = new Set(
+        (existing || []).filter((r: any) => !r.flat_id).map((r: any) => String(r.owner_id)),
+      );
+
+      const toCreate = billable.filter((f) => !already.has(f.id) && !legacyOwners.has(f.owner_id));
+      const skipped = billable.length - toCreate.length;
+
       if (!toCreate.length) {
         return NextResponse.json(
           {
             success: true,
             created: 0,
-            skipped: already.size,
+            skipped,
             data: [],
-            message: `Every active owner already has an invoice for ${billingMonth}.`,
+            message: `Every flat already has an invoice for ${billingMonth}.`,
           },
           { status: 200 }
         );
       }
 
-      const rows = toCreate.map((r: any) => {
-        const charge = Number(r.default_service_charge || 0);
+      const rows = toCreate.map((f) => {
+        const charge = Number(f.default_service_charge || 0);
         return {
           id: crypto.randomUUID(),
           building_id: buildingId,
           admin_id: gate.uid!,
-          owner_id: String(r.owner_id),
+          owner_id: f.owner_id,
+          flat_id: f.id,
+          // Snapshot, so every receipt, cutting slip and accounts note can name its own flat with
+          // no join — and still can once the flat row is gone. See ADD_BUILDING_OWNER_FLATS.sql.
+          flat_label: f.unit_label,
           billing_month: billingMonth,
           service_charge: charge,
           extra_charge: 0,
@@ -118,13 +137,14 @@ export async function POST(request: NextRequest) {
         .select(INVOICE_SELECT);
       if (insertErr) throw insertErr;
 
+      // Deduped: a three-flat owner gets ONE notification, not three identical ones sharing a tag.
       void notifyOwners(
-        (created || []).map((i: any) => String(i.owner_id)),
+        Array.from(new Set((created || []).map((i: any) => String(i.owner_id)))),
         billingMonth
       );
 
       return NextResponse.json(
-        { success: true, created: created?.length || 0, skipped: already.size, data: created || [] },
+        { success: true, created: created?.length || 0, skipped, data: created || [] },
         { status: 201 }
       );
     }
@@ -141,16 +161,39 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Fall back to the roster's default charge when the caller didn't name one, which is what
-    // makes "issue an invoice" a one-click action for the ordinary month.
-    const { data: rosterRow } = await supabaseAdminEngine
-      .from('building_owners')
-      .select('default_service_charge')
-      .eq('building_id', buildingId)
-      .eq('owner_id', ownerIdParam)
-      .maybeSingle();
+    // WHICH FLAT. Named outright when the caller knows; inferred when the owner holds exactly
+    // one, which keeps the ordinary one-click case working and keeps the old body shape valid.
+    // Never guessed when there are several — billing the wrong flat is not recoverable by the
+    // admin without deleting an invoice.
+    const ownerFlats = await flatsOfOwner(ownerIdParam, true);
+    const flatIdParam = String(body.flatId || '').trim();
+    let flat = flatIdParam ? ownerFlats.find((f) => f.id === flatIdParam) : undefined;
 
-    const amounts = invoiceAmountsFrom(body, Number(rosterRow?.default_service_charge || 0));
+    if (flatIdParam && !flat) {
+      return NextResponse.json({ success: false, error: 'That flat is not on this owner.' }, { status: 404 });
+    }
+    if (!flat) {
+      if (ownerFlats.length === 1) flat = ownerFlats[0];
+      else if (ownerFlats.length === 0) {
+        return NextResponse.json(
+          { success: false, error: 'That owner has no flats to bill. Add one on the roster first.' },
+          { status: 400 },
+        );
+      } else {
+        return NextResponse.json(
+          {
+            success: false,
+            code: 'FLAT_REQUIRED',
+            error: `That owner holds ${ownerFlats.length} flats — say which one: ${ownerFlats.map((f) => f.unit_label || '—').join(', ')}.`,
+          },
+          { status: 400 },
+        );
+      }
+    }
+
+    // Fall back to the FLAT's default charge when the caller didn't name one, which is what makes
+    // "issue an invoice" a one-click action for the ordinary month.
+    const amounts = invoiceAmountsFrom(body, Number(flat.default_service_charge || 0));
 
     const { data: created, error: insertErr } = await supabaseAdminEngine
       .from('building_service_invoices')
@@ -159,6 +202,8 @@ export async function POST(request: NextRequest) {
         building_id: buildingId,
         admin_id: gate.uid!,
         owner_id: ownerIdParam,
+        flat_id: flat.id,
+        flat_label: flat.unit_label,
         billing_month: billingMonth,
         note: body.note ? String(body.note).trim().slice(0, 1000) : null,
         ...amounts,
@@ -167,11 +212,20 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (insertErr) {
-      // 23505 is the (owner_id, billing_month) unique index — the one duplicate this table has a
-      // real opinion about. Say what happened instead of leaking a constraint name.
+      // 23505 is a unique index, and WHICH one is worth saying. (flat_id, billing_month) is the
+      // ordinary duplicate. The legacy (owner_id, billing_month) partial index can only fire while
+      // a pre-flats invoice still exists for that owner that month — i.e. a half-finished
+      // migration, which is an hour of confusion if the message does not name it.
       if ((insertErr as any).code === '23505') {
+        const legacy = String((insertErr as any).message || '').includes('legacy_owner_month');
         return NextResponse.json(
-          { success: false, error: `That owner already has an invoice for ${billingMonth}.`, code: 'INVOICE_EXISTS' },
+          {
+            success: false,
+            code: 'INVOICE_EXISTS',
+            error: legacy
+              ? `That owner already has a pre-flats invoice for ${billingMonth}. Point it at a flat, or delete it, before issuing per-flat invoices for that month.`
+              : `${flat.unit_label || 'That flat'} already has an invoice for ${billingMonth}.`,
+          },
           { status: 409 }
         );
       }

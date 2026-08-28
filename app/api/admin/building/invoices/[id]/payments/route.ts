@@ -127,7 +127,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         txnDate: paidOn,
         source: 'billing',
         sourceRef: String(payment.id),
-        note: await describePayer(String(invoice.owner_id), String(invoice.billing_month || '')),
+        note: await describePayer(
+          String(invoice.owner_id),
+          String(invoice.billing_month || ''),
+          (invoice as any).flat_label ?? null,
+        ),
       });
     } catch (bookErr) {
       console.error('[building-billing] bookAutoTransaction failed (non-fatal):', bookErr);
@@ -160,15 +164,25 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
  * owner whose roster row or profile has gone missing still gets their payment booked, just
  * without the label.
  */
-async function describePayer(ownerId: string, billingMonth: string): Promise<string | null> {
+async function describePayer(
+  ownerId: string,
+  billingMonth: string,
+  flatLabel: string | null,
+): Promise<string | null> {
   const parts: string[] = [];
   try {
-    const { data: roster } = await supabaseAdminEngine
-      .from('building_owners')
-      .select('unit_label')
-      .eq('owner_id', ownerId)
-      .maybeSingle();
-    const unit = String(roster?.unit_label || '').trim();
+    // THE INVOICE'S OWN FLAT FIRST. An owner may hold several, and building_owners carries only
+    // their PRIMARY one — so looking the label up by owner would book every flat's money against
+    // the same flat's name, and the accounts note is what an admin reconciles against.
+    let unit = String(flatLabel || '').trim();
+    if (!unit) {
+      const { data: roster } = await supabaseAdminEngine
+        .from('building_owners')
+        .select('unit_label')
+        .eq('owner_id', ownerId)
+        .maybeSingle();
+      unit = String(roster?.unit_label || '').trim();
+    }
     if (unit) parts.push(unit);
 
     const { data: profile } = await supabaseAdminEngine

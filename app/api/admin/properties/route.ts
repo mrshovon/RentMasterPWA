@@ -1,24 +1,9 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '../../../../lib/supabase-server';
+import { generateUniqueUnitId } from '@/lib/properties';
 import { resolveOwnerSubscription, assertOwnerCanWrite, checkCreateLimit, PLAN_GOVERNED_ROLES } from '../../../../lib/subscription';
 import { apiError } from '@/lib/api-response';
-
-// Generates a human-readable unit code like "UNIT-1234", verifying it isn't
-// already taken (the properties.id PK is a text column). Falls back to a longer
-// timestamp-based code on the rare chance of repeated collisions.
-async function generateUniqueUnitId(): Promise<string> {
-  for (let attempt = 0; attempt < 6; attempt++) {
-    const candidate = `UNIT-${Math.floor(1000 + Math.random() * 9000)}`;
-    const { data: clash } = await supabaseAdminEngine
-      .from('properties')
-      .select('id')
-      .eq('id', candidate)
-      .maybeSingle();
-    if (!clash) return candidate;
-  }
-  return `UNIT-${Date.now().toString().slice(-6)}`;
-}
 
 // =========================================================
 // 📥 1. FETCH ALL PROPERTIES FOR SPECIFIC OWNER (GET)

@@ -71,6 +71,29 @@ export const BUILDING_SELECT =
 export const BUILDING_OWNER_SELECT =
   'building_id, owner_id, unit_label, flat_no, default_service_charge, joined_at, is_active, created_at, updated_at';
 
+/**
+ * One flat an owner holds in a building. An owner may hold several; building_owners stays one row
+ * per person (see ADD_BUILDING_OWNER_FLATS.sql for why that separation is load-bearing).
+ */
+export interface BuildingOwnerFlat {
+  id: string;
+  building_id: string;
+  owner_id: string;
+  unit_label: string | null;
+  flat_no: string | null;
+  default_service_charge: number;
+  is_primary: boolean;
+  /** properties.id — TEXT, not uuid. The base schema was built by hand. */
+  property_id: string | null;
+  is_active: boolean;
+  joined_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export const BUILDING_FLAT_SELECT =
+  'id, building_id, owner_id, unit_label, flat_no, default_service_charge, is_primary, property_id, joined_at, is_active, created_at, updated_at';
+
 export function isBuildingAdmin(role: string | null | undefined): boolean {
   return role === BUILDING_ADMIN_ROLE;
 }
@@ -157,6 +180,7 @@ export async function buildingMembershipOf(ownerId: string): Promise<BuildingMem
   if (hit && Date.now() - hit.at < MEMBERSHIP_TTL_MS) return hit.value;
 
   let value: BuildingMembership | null = null;
+  let failed = false;
   try {
     const { data, error } = await supabaseAdminEngine
       .from('building_owners')
@@ -167,6 +191,7 @@ export async function buildingMembershipOf(ownerId: string): Promise<BuildingMem
       .eq('is_active', true)
       .maybeSingle();
 
+    if (error) failed = true;
     const building = (data as any)?.buildings;
     if (!error && data && building && building.is_active !== false) {
       value = {
@@ -179,11 +204,75 @@ export async function buildingMembershipOf(ownerId: string): Promise<BuildingMem
     }
   } catch {
     value = null;
+    failed = true;
   }
 
-  membershipCache.set(ownerId, { value, at: Date.now() });
-  if (membershipCache.size > 5000) membershipCache.clear();
+  // Cache a genuine "not in a building" for the TTL, but NEVER cache a failure. The two are
+  // indistinguishable in `value` — both are null — and caching the second one pins the owner to
+  // the FREE plan for a full minute over a transient blip, with their excess properties going
+  // view-only and Staff/Accounts switching off. A retry costs one query.
+  if (!failed) {
+    membershipCache.set(ownerId, { value, at: Date.now() });
+    if (membershipCache.size > 5000) membershipCache.clear();
+  }
   return value;
+}
+
+/**
+ * The flats one owner holds, newest last. Separately cached from membershipCache and
+ * deliberately NOT called from buildingMembershipOf() or anything the plan-resolution path
+ * reaches — that separation is the whole reason flats live in a child table. See
+ * ADD_BUILDING_OWNER_FLATS.sql.
+ *
+ * Unlike buildingMembershipOf() this one THROWS on a real error rather than reading as "no
+ * flats". An empty list here means "this owner is billed for nothing", which is a sentence the
+ * generate-a-month run would act on; a missing table must not be able to say it.
+ */
+export async function flatsOfOwner(
+  ownerId: string,
+  activeOnly = true,
+): Promise<BuildingOwnerFlat[]> {
+  if (!ownerId) return [];
+  let q = supabaseAdminEngine
+    .from('building_owner_flats')
+    .select(BUILDING_FLAT_SELECT)
+    .eq('owner_id', ownerId)
+    .order('created_at', { ascending: true });
+  if (activeOnly) q = q.eq('is_active', true);
+  const { data, error } = await q;
+  if (error) throw new Error(error.message);
+  return (data || []) as unknown as BuildingOwnerFlat[];
+}
+
+/** Every flat on a building's roster. The generate-a-month enumeration. Throws, for the same reason. */
+export async function buildingFlats(
+  buildingId: string,
+  activeOnly = true,
+): Promise<BuildingOwnerFlat[]> {
+  let q = supabaseAdminEngine
+    .from('building_owner_flats')
+    .select(BUILDING_FLAT_SELECT)
+    .eq('building_id', buildingId)
+    .order('created_at', { ascending: true });
+  if (activeOnly) q = q.eq('is_active', true);
+  const { data, error } = await q;
+  if (error) throw new Error(error.message);
+  return (data || []) as unknown as BuildingOwnerFlat[];
+}
+
+/** One flat, scoped to its building so a guessed id reads as not-found. */
+export async function flatInBuilding(
+  buildingId: string,
+  flatId: string,
+): Promise<BuildingOwnerFlat | null> {
+  const { data, error } = await supabaseAdminEngine
+    .from('building_owner_flats')
+    .select(BUILDING_FLAT_SELECT)
+    .eq('building_id', buildingId)
+    .eq('id', flatId)
+    .maybeSingle();
+  if (error || !data) return null;
+  return data as unknown as BuildingOwnerFlat;
 }
 
 /** Drop a cached membership after attaching/detaching, so the change shows immediately. */

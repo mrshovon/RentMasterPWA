@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { apiError } from '@/lib/api-response';
-import { buildingMembershipOf, BUILDING_SELECT, type BuildingRow } from '@/lib/building';
+import { buildingMembershipOf, flatsOfOwner, BUILDING_SELECT, type BuildingRow } from '@/lib/building';
 import { INVOICE_SELECT } from '@/lib/building-billing';
 
 // =====================================================================================
@@ -125,6 +125,10 @@ export async function GET(request: NextRequest) {
           signatoryTitle: buildingRow?.signatory_title ?? null,
           signatureUrl,
         },
+        // Every flat this owner holds. `building.unitLabel` above stays populated from the
+        // membership (their primary) so anything still reading the scalar keeps working; screens
+        // that can show more than one flat read this instead.
+        flats: await flatsOfOwner(uid, true).catch(() => []),
         owner: { name: ownerName },
         count: shaped.length,
         data: shaped,

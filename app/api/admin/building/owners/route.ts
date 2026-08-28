@@ -13,7 +13,9 @@ import {
   BUILDING_OWNER_SELECT,
   isDuplicateEmailError,
   LOGIN_ID_MAX_SUFFIX,
+  buildingFlats,
 } from '@/lib/building';
+import { readFlatsFromBody, insertOwnerFlats, groupFlatsByOwner } from '@/lib/building-flats';
 
 // =====================================================================================
 // 🏢 BUILDING ADMIN — THE OWNER ROSTER
@@ -63,7 +65,15 @@ export async function GET(request: NextRequest) {
       .order('created_at', { ascending: true });
     if (error) throw error;
 
-    const shaped = await enrichRoster(data || []);
+    // ONE query for the building's flats, grouped in memory. Never per owner: enrichRoster() is
+    // already N auth lookups, and a flats query inside it would make the roster N+N round trips.
+    // Inactive flats are included — the roster is where an admin manages them back on.
+    const byOwner = groupFlatsByOwner(await buildingFlats(gate.building!.id, false));
+
+    const shaped = (await enrichRoster(data || [])).map((row: any) => ({
+      ...row,
+      flats: byOwner[String(row.owner_id)] || [],
+    }));
     return NextResponse.json({ success: true, count: shaped.length, data: shaped }, { status: 200 });
   } catch (err) {
     return apiError(request, err);
@@ -102,9 +112,21 @@ export async function POST(request: NextRequest) {
     const name = String(body.name || '').trim();
     if (!name) return NextResponse.json({ success: false, error: 'The owner needs a name.' }, { status: 400 });
 
-    // ONE INPUT, TWO COLUMNS. The admin types the flat once; `unit_label` keeps it as written
-    // for statements ("Flat 4B") and `flat_no` keeps the token that went into the login ("4b").
-    const unitLabel = String(body.flatNo ?? body.unitLabel ?? '').trim();
+    // An owner may hold SEVERAL flats under one login. `flats` is the new shape; the old scalar
+    // `flatNo`/`unitLabel`/`defaultServiceCharge` body is synthesised into a one-element array so
+    // nothing that already calls this route has to change.
+    //
+    // flats[0] IS THE LOGIN FLAT. The identifier is built from it once and then frozen — adding or
+    // removing flats later never touches it (see owners/[id]/route.ts's header). building_owners
+    // keeps that first flat's label and token as login provenance, and as the fallback for any read
+    // path still keyed on the owner rather than the flat.
+    let flats;
+    try {
+      flats = readFlatsFromBody(body, { requireFlat: generatesLogins });
+    } catch (e: any) {
+      return NextResponse.json({ success: false, error: e.message }, { status: 400 });
+    }
+    const unitLabel = flats[0].unitLabel;
     const flatNo = flatToken(unitLabel);
 
     const parsedEmail = generatesLogins
@@ -163,7 +185,10 @@ export async function POST(request: NextRequest) {
         owner_id: ownerId,
         unit_label: unitLabel || null,
         flat_no: flatNo || null,
-        default_service_charge: Number(body.defaultServiceCharge || 0) || 0,
+        // Frozen after this change — the real charge lives on each flat row, because a shop and a
+        // three-bed are not billed the same. Kept in step with the primary flat so a rollback of
+        // the code still finds a sane number here. See ADD_BUILDING_OWNER_FLATS.sql.
+        default_service_charge: flats[0].defaultServiceCharge,
       })
       .select(BUILDING_OWNER_SELECT)
       .single();
@@ -173,6 +198,26 @@ export async function POST(request: NextRequest) {
       // stray account. Roll it back so the admin can simply try again.
       await supabaseAdminEngine.auth.admin.deleteUser(ownerId).catch(() => {});
       throw rosterErr;
+    }
+
+    // The flats, and the rentable unit behind each one. A flats failure rolls the whole thing
+    // back — an owner with a roster row but no flats would be billed for nothing, silently. A
+    // PROPERTY failure does not: that is the owner's own data, they can create one themselves, and
+    // deleting a freshly made auth user over it is far the worse trade.
+    let created;
+    try {
+      created = await insertOwnerFlats({
+        buildingId: gate.building!.id,
+        ownerId,
+        ownerPhone: parsedPhone.value,
+        building: gate.building!,
+        flats,
+        firstIsPrimary: true,
+      });
+    } catch (flatsErr) {
+      await supabaseAdminEngine.from('building_owners').delete().eq('owner_id', ownerId);
+      await supabaseAdminEngine.auth.admin.deleteUser(ownerId).catch(() => {});
+      throw flatsErr;
     }
 
     forgetBuildingMembership(ownerId);
@@ -187,7 +232,18 @@ export async function POST(request: NextRequest) {
     // `email` IS the identifier — after a collision it is not the one the admin previewed, and
     // this response is the only place they are shown which one was issued.
     return NextResponse.json(
-      { success: true, data: { ...roster, email: loginId, name, phone: parsedPhone.value, suspended: false } },
+      {
+        success: true,
+        data: {
+          ...roster,
+          email: loginId,
+          name,
+          phone: parsedPhone.value,
+          suspended: false,
+          flats: created.flats,
+        },
+        warnings: created.warnings.length ? created.warnings : undefined,
+      },
       { status: 201 }
     );
   } catch (err) {

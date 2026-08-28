@@ -153,6 +153,9 @@ export async function purgeOwnerAccount(id: string): Promise<PurgeResult> {
     // and the building is deleted last.
     { table: 'building_service_payments',  column: 'owner_id',         values: owned },
     { table: 'building_service_invoices',  column: 'owner_id',         values: owned },
+    // Before building_owners: a flat row outliving the account it belongs to is invisible to
+    // every screen and would keep the person on a building's billing enumeration forever.
+    { table: 'building_owner_flats',       column: 'owner_id',         values: owned },
     { table: 'building_owners',            column: 'owner_id',         values: owned },
     // The config lists, notices, roster and service-charge rows still hanging off the building go
     // with it via its own `on delete cascade`. building_plan_invoices NO LONGER DOES — see
