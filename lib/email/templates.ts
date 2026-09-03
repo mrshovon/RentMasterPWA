@@ -18,13 +18,13 @@
 // logo would be a broken-image icon at the top of a password-reset email.
 // =====================================================================================
 
+import { BRAND_PRIMARY as BRAND } from '../brand';
+
 export interface EmailBody {
   subject: string;
   html: string;
   text: string;
 }
-
-const BRAND = '#136aba'; // matches the Android notification colour and the light-theme primary
 
 /** Shell shared by every template, so all mail from the app looks like it came from one place. */
 function wrap(inner: string): string {
