@@ -25,6 +25,19 @@ export default async function middleware(request: NextRequest) {
     'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-rentmaster-uid, x-rentmaster-role, x-rentmaster-phone, x-rentmaster-tenant-id',
     'Access-Control-Allow-Credentials': 'true',
+    // Cache the preflight. Without this the browser re-asks on EVERY cross-origin write —
+    // the UI and the API are separate origins in dev (:3001 vs :3000) and in production, so
+    // that was an extra round trip in front of every POST/PATCH/DELETE in the app.
+    //
+    // It also removes the abort this was diagnosed from: a preflight still in flight when a
+    // page hard-navigates (login does window.location.replace) is severed by the browser, and
+    // because the OPTIONS branch below answers without ever reading the body, nothing is
+    // listening on that socket — Node escalates it to an uncaughtException that Next logs as
+    // "Error: aborted / ECONNRESET". Fewer preflights, fewer severed sockets.
+    //
+    // 7200 is deliberate, not arbitrary: Chrome silently caps this at 2 hours and ignores
+    // anything larger, so a bigger number would only mislead the next reader.
+    'Access-Control-Max-Age': '7200',
   };
 
   // Immediate exit for browser preflight options checks
