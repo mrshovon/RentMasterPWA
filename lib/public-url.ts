@@ -33,6 +33,35 @@ export function resolveAppBaseUrl(request?: { headers: Headers } | null): string
 }
 
 /**
+ * Where THIS API lives, as seen from the public internet — the base for a URL we hand to an
+ * outside service to call back on (today: the UddoktaPay webhook).
+ *
+ * Deliberately different from resolveAppBaseUrl above, which resolves the FRONTEND. Getting the
+ * two confused would point a payment webhook at the UI, where nothing would answer it.
+ *
+ * Derived from the incoming request by default rather than an env var, because that is the one
+ * value guaranteed to be the address the caller actually reached us on — it works unchanged on
+ * production, on a Vercel preview deployment, and through an ngrok/cloudflared tunnel during
+ * local testing, none of which share a hostname. `x-forwarded-*` is read first because behind
+ * Vercel's proxy request.url carries the internal origin, not the public one.
+ *
+ * PUBLIC_API_URL overrides it for the case where those headers cannot be trusted.
+ */
+export function resolveApiBaseUrl(request: { headers: Headers; url: string }): string {
+  if (process.env.PUBLIC_API_URL) return process.env.PUBLIC_API_URL.replace(/\/$/, '');
+
+  const host = request.headers.get('x-forwarded-host') || request.headers.get('host');
+  if (host) {
+    const proto =
+      request.headers.get('x-forwarded-proto') ||
+      (host.startsWith('localhost') || host.startsWith('127.0.0.1') ? 'http' : 'https');
+    return `${proto}://${host}`;
+  }
+
+  return new URL(request.url).origin;
+}
+
+/**
  * Where a Supabase recovery link should land.
  *
  * ⚠️ Whatever this resolves to must ALSO be listed under Supabase → Authentication → URL

@@ -5,8 +5,7 @@ import { sendPushToRole } from '@/lib/push-send';
 import { DEFAULT_PROVIDER_ID } from '@/lib/payments/registry';
 import { encryptSubmissionFields, shapeSubmission, PaymentFieldError } from '@/lib/payments/submissions';
 import { validatePhone } from '@/lib/validate';
-import { resolveOwnerSubscription, tierVisibleToOwner, tierIsOneTime, ownerUsedTierIds } from '@/lib/subscription';
-import { buildingMembershipOf } from '@/lib/building';
+import { checkTierPurchasable, findPendingSubmission } from '@/lib/payments/eligibility';
 import crypto from 'crypto';
 import { apiError } from '@/lib/api-response';
 
@@ -56,73 +55,27 @@ export async function POST(request: NextRequest) {
     const uid = ownerId(request);
     if (!uid) return NextResponse.json({ error: 'Context matching identity missing.' }, { status: 400 });
 
-    // A flat owner under a Whole Building plan does not pay us — their building admin does.
-    // Refused here, not merely hidden in the UI, so a stray submission can never enter the
-    // admin's reconciliation queue for money nobody expected.
-    const membership = await buildingMembershipOf(uid);
-    if (membership) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: `Your plan is covered by ${membership.buildingName}. There is nothing to pay here — contact your building administrator.`,
-          code: 'BUILDING_MANAGED_PLAN',
-        },
-        { status: 403 }
-      );
-    }
-
     const body = await request.json();
     const { tierId, amount, senderMsisdn, txnId } = body;
 
-    if (!tierId) return NextResponse.json({ success: false, error: 'A plan is required.' }, { status: 400 });
     if (!txnId?.trim()) return NextResponse.json({ success: false, error: 'The bKash transaction id is required.' }, { status: 400 });
     // The admin reconciles this submission against the bKash statement by number, so a
     // malformed one produces a payment that can never be matched to a plan.
     const parsedMsisdn = validatePhone(senderMsisdn, { required: true });
     if (!parsedMsisdn.ok) return NextResponse.json({ success: false, error: parsedMsisdn.error }, { status: 400 });
 
-    // Validate the tier: must exist, be active, be a paid non-custom tier.
-    const { data: tier, error: tierErr } = await supabaseAdminEngine
-      .from('subscription_tiers')
-      .select('*')
-      .eq('id', tierId)
-      .maybeSingle();
-    if (tierErr) throw tierErr;
-    if (!tier || tier.is_active === false) {
-      return NextResponse.json({ success: false, error: 'That plan is not available.' }, { status: 400 });
+    // Every 'may they buy this, and for how much' rule lives in one place, shared with the
+    // UddoktaPay checkout route — see lib/payments/eligibility.ts for why.
+    const check = await checkTierPurchasable(uid, tierId);
+    if (!check.ok) {
+      return NextResponse.json(
+        { success: false, error: check.error, ...(check.code ? { code: check.code } : {}) },
+        { status: check.status },
+      );
     }
-    // Hidden plans are admin-assigned only, so a leaked tier id must not be payable. The owner
-    // already ON the plan is allowed through — that is the renewal path, and without it a
-    // bespoke plan would be impossible to pay for a second time.
-    const currentSub = await resolveOwnerSubscription(uid);
-    if (!tierVisibleToOwner(tier, currentSub.tierId)) {
-      return NextResponse.json({ success: false, error: 'That plan is not available.' }, { status: 400 });
-    }
-    if (tier.billing_interval === 'custom') {
-      return NextResponse.json({ success: false, error: 'That plan is arranged with our team — please use Contact us.' }, { status: 400 });
-    }
-    // One-time plans can be taken once. Guarded on this path too — otherwise a paid trial could
-    // simply be re-bought through the payment screen.
-    if (tierIsOneTime(tier) && (await ownerUsedTierIds(uid)).has(tier.id)) {
-      return NextResponse.json({
-        success: false,
-        code: 'ONE_TIME_PLAN_USED',
-        error: `${tier.name} is a one-time plan and you have already used it. Please choose another plan.`,
-      }, { status: 400 });
-    }
-    if (Number(tier.price || 0) <= 0) {
-      return NextResponse.json({ success: false, error: 'The free plan does not require a payment.' }, { status: 400 });
-    }
+    const tier = check.tier;
 
-    // One pending submission at a time — avoids a queue of duplicates from repeat taps.
-    const { data: existingPending } = await supabaseAdminEngine
-      .from('payment_submissions')
-      .select('id')
-      .eq('owner_id', uid)
-      .eq('status', 'pending')
-      .limit(1)
-      .maybeSingle();
-    if (existingPending) {
+    if (await findPendingSubmission(uid)) {
       return NextResponse.json({
         success: false,
         code: 'ALREADY_PENDING',
@@ -147,11 +100,10 @@ export async function POST(request: NextRequest) {
           owner_email: ownerEmail,
           provider: DEFAULT_PROVIDER_ID,
           tier_id: tier.id,
-          // Default to what the owner is actually shown: the price AFTER any admin discount.
-          // Defaulting to the list price billed them for a discount they were quoted.
-          amount: amount != null && amount !== ''
-            ? Number(amount)
-            : Number(tier.price || 0) * (1 - Number(tier.discount_percent || 0) / 100),
+          // The owner types what they say they paid; the admin reconciles it by eye before
+          // approving, which is what makes accepting a client value safe HERE and not on the
+          // gateway path. check.amount is the discounted price they were quoted.
+          amount: amount != null && amount !== '' ? Number(amount) : check.amount,
           // Encrypted at rest — the payer's number and the transaction id together tie a person
           // to a financial transaction. Decrypted back for the owner and the admin queue by
           // shapeSubmission(). See lib/payments/submissions.ts.

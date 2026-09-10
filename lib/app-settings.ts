@@ -6,11 +6,23 @@ import { encryptField, decryptField, hasEncryptionKey } from './field-crypto';
 // Service-role only (the table is RLS deny-all). See ADD_APP_SETTINGS.sql.
 // =====================================================================================
 
+/**
+ * Which ways an owner may pay. Deliberately ONE switch rather than a selector here plus an
+ * `enabled` flag on the gateway config: two toggles answering one question is how a config ends
+ * up in a state nobody can explain ("it's enabled but not offered?"). Turning UddoktaPay off IS
+ * `methods: 'manual'`.
+ *
+ * The gateway's credentials live separately (see UddoktaPayConfig) so they can be entered and
+ * tested before anyone is sent to them.
+ */
+export type PaymentMethods = 'manual' | 'uddoktapay' | 'both';
+
 export interface PaymentConfig {
   provider: string;       // which MFS the number/QR belongs to (bKash, Nagad, Rocket, …)
   walletNumber: string;   // the MFS personal number owners pay into
   instructions: string;   // steps shown on the owner payment screen
   qrUrl: string | null;   // public URL of the QR image in the payment-assets bucket
+  methods: PaymentMethods;
 }
 
 /**
@@ -32,6 +44,9 @@ export const DEFAULT_PAYMENT_CONFIG: PaymentConfig = {
   walletNumber: '',
   instructions: '',
   qrUrl: null,
+  // 'manual' is the safe default in both directions: it is what every existing install already
+  // does, and a fresh install cannot accidentally offer a gateway it has no keys for.
+  methods: 'manual',
 };
 
 // Read one settings row's JSON value. Returns `fallback` when the row is missing.
@@ -234,6 +249,80 @@ export const DEFAULT_BREVO_CONFIG: BrevoConfig = {
 };
 
 export const getBrevoConfig = () => getSetting<BrevoConfig>('brevo_config', DEFAULT_BREVO_CONFIG);
+
+// -------------------------------------------------------------------------------------
+// UDDOKTAPAY — the hosted payment gateway (a Paymently install). The SECOND secret in this
+// table, and it follows every rule Brevo established above, for the same reason: this key can
+// move money and issue refunds on the account.
+//
+//   * Both keys are `*Enc` envelopes. The field NAMES are load-bearing — a `...cfg` spread into
+//     a response body cannot leak something called `liveApiKeyEnc` by accident the way it could
+//     leak `apiKey`.
+//   * The admin GET route returns a masked preview and booleans, never a key. Empty on write
+//     means "keep", not "clear", because the form cannot show what it never received.
+//   * There is NO /api/app/ counterpart. Nothing in a browser needs to know this exists.
+//
+// SANDBOX AND LIVE ARE TWO SEPARATE CREDENTIAL PAIRS, not one pair plus a flag. They are
+// genuinely different accounts with different keys, and keeping both stored means flipping
+// `mode` to test something does not destroy the live key — which is exactly the mistake a single
+// pair invites at the worst possible moment.
+//
+// The base URLs are configurable rather than hard-coded because a Paymently install lives on the
+// customer's own domain (ours is bari360.paymently.io); there is no single vendor endpoint.
+// -------------------------------------------------------------------------------------
+export interface UddoktaPayConfig {
+  mode: 'sandbox' | 'live';
+  sandboxBaseUrl: string;
+  sandboxApiKeyEnc: string;
+  liveBaseUrl: string;
+  liveApiKeyEnc: string;
+}
+
+export const DEFAULT_UDDOKTAPAY_CONFIG: UddoktaPayConfig = {
+  // Sandbox by default. A fresh install that somehow reached a checkout should hit the test
+  // gateway, not charge a real card.
+  mode: 'sandbox',
+  // UddoktaPay's shared demo environment, with a publicly documented test key.
+  sandboxBaseUrl: 'https://sandbox.uddoktapay.com/api',
+  sandboxApiKeyEnc: '',
+  liveBaseUrl: '',
+  liveApiKeyEnc: '',
+};
+
+export const getUddoktaPayConfig = () =>
+  getSetting<UddoktaPayConfig>('uddoktapay_config', DEFAULT_UDDOKTAPAY_CONFIG);
+
+/**
+ * Write the gateway config, encrypting whichever keys were supplied.
+ *
+ * `sandboxApiKey`/`liveApiKey` are RAW keys and are optional: omitted or empty means "leave the
+ * stored one alone". That is what makes the write-only form work — the admin can change the mode
+ * or a base URL without re-typing a key they cannot see.
+ *
+ * @throws when a key was supplied but no encryption key is configured. Storing a payment
+ *         credential in the clear while reporting success is the worst of both outcomes.
+ */
+export async function setUddoktaPayConfig(
+  next: Omit<UddoktaPayConfig, 'sandboxApiKeyEnc' | 'liveApiKeyEnc'>,
+  keys: { sandboxApiKey?: string; liveApiKey?: string } = {},
+): Promise<void> {
+  const current = await getUddoktaPayConfig();
+  const sandboxRaw = (keys.sandboxApiKey || '').trim();
+  const liveRaw = (keys.liveApiKey || '').trim();
+
+  if ((sandboxRaw || liveRaw) && !hasEncryptionKey()) {
+    throw new Error(
+      'Cannot save the API key: FIELD_ENCRYPTION_KEY is not configured on the server.',
+    );
+  }
+
+  await setSetting('uddoktapay_config', {
+    ...DEFAULT_UDDOKTAPAY_CONFIG,
+    ...next,
+    sandboxApiKeyEnc: sandboxRaw ? encryptField(sandboxRaw) : current.sandboxApiKeyEnc,
+    liveApiKeyEnc: liveRaw ? encryptField(liveRaw) : current.liveApiKeyEnc,
+  } satisfies UddoktaPayConfig);
+}
 
 // -------------------------------------------------------------------------------------
 // LEGAL DOCUMENTS — admin-editable Terms and Privacy Policy.
