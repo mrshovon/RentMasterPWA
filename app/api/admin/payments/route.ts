@@ -38,7 +38,17 @@ export async function GET(request: NextRequest) {
       .order('created_at', { ascending: false });
     if (error) throw error;
 
-    const shaped = (data || []).map(shapeSubmission);
+    // Resolve the tier's display name, the same join the super-admin queue does. tier_name is not
+    // a column — without this the owner's own Plan tab falls back to the raw tier_id and tells
+    // them about their "premium_monthly" plan, which is a database slug, not a product.
+    const { data: tiers } = await supabaseAdminEngine.from('subscription_tiers').select('id, name');
+    const tierNameById: Record<string, string> = {};
+    for (const t of tiers || []) tierNameById[t.id] = t.name;
+
+    const shaped = (data || []).map((r) => ({
+      ...shapeSubmission(r),
+      tier_name: tierNameById[r.tier_id] || r.tier_id,
+    }));
 
     return NextResponse.json({ success: true, count: shaped.length, data: shaped }, { status: 200 });
   } catch (err) {

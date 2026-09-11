@@ -118,18 +118,61 @@ export function priceForOwner(tier: any): number {
   return Math.round(list * (1 - off / 100) * 100) / 100;
 }
 
+/** What a pending row is, to the callers that have to decide whether it really blocks. */
+export interface PendingSubmission {
+  id: string;
+  provider: string;
+  /**
+   * Written only at fulfilment, and carrying the partial unique index that is this feature's
+   * idempotency key. So a NULL here means no gateway invoice was ever bound to this row, which
+   * is the same as saying no money was ever attached to it. Every automatic cancel in this
+   * codebase is guarded on it — see ADD_PAYMENT_CANCELLED.sql.
+   */
+  gateway_invoice_id: string | null;
+  created_at: string;
+}
+
 /**
  * One pending submission at a time — avoids a queue of duplicates from repeat taps.
  * Shared so the gateway cannot open a second checkout behind an unfinished manual submission,
  * or vice versa.
+ *
+ * Returns the whole row rather than just its id: the gateway checkout has to tell an owner who
+ * really is mid-payment apart from one whose browser died three days ago, and it cannot do that
+ * from an id. Both callers still treat a truthy answer as blocking by default.
  */
-export async function findPendingSubmission(ownerId: string): Promise<{ id: string } | null> {
+export async function findPendingSubmission(ownerId: string): Promise<PendingSubmission | null> {
   const { data } = await supabaseAdminEngine
     .from('payment_submissions')
-    .select('id')
+    .select('id, provider, gateway_invoice_id, created_at')
     .eq('owner_id', ownerId)
     .eq('status', 'pending')
     .limit(1)
     .maybeSingle();
-  return data ?? null;
+  return (data as PendingSubmission | null) ?? null;
+}
+
+/**
+ * How long an unfinished gateway checkout blocks the next one.
+ *
+ * Long enough that nobody is interrupted mid-payment — an UddoktaPay session is minutes, not
+ * half an hour — and short enough that a closed tab is not a support ticket.
+ */
+export const STALE_CHECKOUT_MS = 30 * 60 * 1000;
+
+/**
+ * True when a pending row is a gateway checkout that was opened, never completed, and has since
+ * gone stale. Such a row represents nothing: no invoice was ever bound to it, so there is no
+ * payment to lose by retiring it.
+ *
+ * A manual_bkash row can never qualify. Someone really did send money and is waiting on a human,
+ * and no timer should make that disappear.
+ */
+export function isStaleCheckout(row: PendingSubmission, now = Date.now()): boolean {
+  if (row.provider !== 'uddoktapay') return false;
+  if (row.gateway_invoice_id) return false;
+  const started = Date.parse(row.created_at);
+  // An unparseable timestamp is not evidence of staleness — leave the row alone.
+  if (!Number.isFinite(started)) return false;
+  return now - started > STALE_CHECKOUT_MS;
 }

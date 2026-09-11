@@ -3,7 +3,7 @@ import type { NextRequest } from 'next/server';
 import crypto from 'crypto';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { apiError } from '@/lib/api-response';
-import { checkTierPurchasable, findPendingSubmission } from '@/lib/payments/eligibility';
+import { checkTierPurchasable, findPendingSubmission, isStaleCheckout } from '@/lib/payments/eligibility';
 import { availablePaymentMethods, currentCredentials, createCharge } from '@/lib/payments/uddoktapay';
 import { resolveAppBaseUrl, resolveApiBaseUrl } from '@/lib/public-url';
 
@@ -22,9 +22,10 @@ import { resolveAppBaseUrl, resolveApiBaseUrl } from '@/lib/public-url';
 // anything existed to attribute it to.
 //
 // The cost is that an abandoned checkout leaves a 'pending' row, which the one-pending-at-a-time
-// rule then blocks the owner behind. That is the same behaviour the manual flow already has, and
-// it is the safe direction: a stuck owner asks an admin, whereas a missing row is money we
-// cannot account for.
+// rule then blocks the owner behind. That used to be permanent, and it was not survivable: an
+// owner who cancelled at the gateway could not pay again at all until a super admin cleared the
+// row by hand. Two things now end it — POST ./cancel, which the cancel_url page calls, and the
+// stale sweep below for the tab that was simply closed.
 // =====================================================================================
 
 export async function POST(request: NextRequest) {
@@ -72,15 +73,35 @@ export async function POST(request: NextRequest) {
     const tier = check.tier;
     const amount = Number(check.amount);
 
-    if (await findPendingSubmission(uid)) {
-      return NextResponse.json(
-        {
-          success: false,
-          code: 'ALREADY_PENDING',
-          error: 'You already have a payment in progress. Please finish or cancel it before starting another.',
-        },
-        { status: 409 },
-      );
+    const blocking = await findPendingSubmission(uid);
+    if (blocking) {
+      // An unfinished gateway checkout that has gone stale represents nothing — no invoice was
+      // ever bound to it — so retire it and let this attempt through rather than making someone
+      // whose browser died last week open a support ticket. isStaleCheckout() can never say yes
+      // to a manual_bkash row or to one with money behind it.
+      if (isStaleCheckout(blocking)) {
+        // Guarded again in the WHERE rather than trusted from the read above: fulfilment may have
+        // landed in between, and it must win.
+        await supabaseAdminEngine
+          .from('payment_submissions')
+          .update({
+            status: 'cancelled',
+            admin_notes: 'Abandoned checkout — no payment was completed.',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', blocking.id)
+          .eq('status', 'pending')
+          .is('gateway_invoice_id', null);
+      } else {
+        return NextResponse.json(
+          {
+            success: false,
+            code: 'ALREADY_PENDING',
+            error: 'You already have a payment in progress. Please finish or cancel it before starting another.',
+          },
+          { status: 409 },
+        );
+      }
     }
 
     // Identity for the gateway's own receipt. Falls back rather than failing: a missing display

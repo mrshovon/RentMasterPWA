@@ -12,7 +12,10 @@ import { shapeSubmission } from '@/lib/payments/submissions';
 // so there is no auth code needed in here.
 // =====================================================================================
 
-const VALID_STATUS = ['pending', 'approved', 'rejected'];
+// Every status the column can hold, so the tab's filter chips all work. 'refunded' was missing
+// from the day it was added, and 'cancelled' arrives with ADD_PAYMENT_CANCELLED.sql — a status
+// absent here is not rejected, it is silently ignored, and the chip quietly lists everything.
+const VALID_STATUS = ['pending', 'approved', 'rejected', 'refunded', 'cancelled'];
 
 export async function GET(request: NextRequest) {
   try {

@@ -113,8 +113,17 @@ async function fulfilOwnerSubscription(
     await logMismatch(invoiceId, 'submission already bound to a different invoice', verified);
     return mismatch();
   }
-  if (row.status !== 'pending') {
-    await logMismatch(invoiceId, `submission is '${row.status}', not pending`, verified);
+  // ⭐ 'cancelled' IS CLAIMABLE, AND THAT IS NOT A LOOPHOLE.
+  // A cancelled row is one we believed had no money behind it — the owner pressed Cancel, or their
+  // checkout went stale and the next one swept it (see ADD_PAYMENT_CANCELLED.sql). Both are
+  // inferences. A COMPLETED verify from the gateway is not: it is the money actually arriving.
+  //
+  // Refusing here would mean taking someone's payment and never activating their plan, which is
+  // the one outcome worse than the bug the cancel state was added to fix. It is safe because every
+  // check that matters is independent of the status — the invoice id must be unbound, the metadata
+  // must name this submission, and the amount must match what we asked for.
+  if (row.status !== 'pending' && row.status !== 'cancelled') {
+    await logMismatch(invoiceId, `submission is '${row.status}', not claimable`, verified);
     return mismatch();
   }
 
