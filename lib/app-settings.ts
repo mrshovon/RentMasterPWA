@@ -152,75 +152,113 @@ export const getTermsVersion = async (): Promise<string> => {
 };
 
 // -------------------------------------------------------------------------------------
-// ANNOUNCEMENT — an admin-written popup shown to owners and tenants when they open the app.
-// One announcement at a time, with a Show/Hide switch; the admin never sees it themselves (they
-// have a Preview button instead), which is also what keeps them able to switch it back off.
+// POPUPS — the admin-written modals, in two places: on app open for signed-in owners and
+// tenants (`announcement`), and on the signed-out sign-in screen on a phone (`login_popup`).
 //
-// `title` and `body` are both optional: an announcement with only an image is a poster, which is
-// the point of the image-only mode. `enabled` with all three empty is refused by the write route.
+// ONE SHAPE FOR BOTH, because they differ in exactly one thing — where they are shown — and that
+// difference lives in the two gates, not in the data. They are edited side by side in the same
+// settings tab, so two near-identical shapes would drift in precisely the details a reader notices.
+//
+// A LIST, not one item. The admin runs several at once — an Eid notice beside a payment change, two
+// banners on the sign-in screen — and each carries its own `active` switch. There is deliberately
+// NO master on/off on the set: "no active items" already means "nothing shows", and a second switch
+// that can disagree with the first is a support question waiting to happen.
+//
+// `id` is server-assigned and stable. Reorder and delete key on it, so an edit that changes every
+// other field still refers to the same item.
 //
 // `imageUrl` is a public URL in the existing RentMasterProDocs bucket, uploaded through
-// /api/admin/uploads with folder 'announcements' — no new bucket, no base64 in this table.
+// /api/admin/uploads — no new bucket, no base64 in this table.
 //
-// `updatedAt` is stamped server-side on every save and acts as the version id: the client uses it
-// to tell "the same announcement I already saw" from "the admin changed it".
+// `updatedAt` is stamped server-side on every save and acts as the version id for the whole set:
+// the gates use it to tell "the same popups I already saw" from "the admin changed something".
 // -------------------------------------------------------------------------------------
-export interface Announcement {
-  enabled: boolean;
-  title: string;
-  body: string;
-  imageUrl: string | null;
-  updatedAt: string;   // ISO 8601, or '' when never saved
-}
-
-export const DEFAULT_ANNOUNCEMENT: Announcement = {
-  enabled: false,
-  title: '',
-  body: '',
-  imageUrl: null,
-  updatedAt: '',
-};
-
-export const getAnnouncement = () => getSetting<Announcement>('announcement', DEFAULT_ANNOUNCEMENT);
-
-// -------------------------------------------------------------------------------------
-// LOGIN POPUP — the same idea as the announcement above, on the SIGNED-OUT side.
-//
-// A sibling rather than a flag on Announcement, because the two are opposites in the one way that
-// matters: the announcement gate requires a session and skips '/' outright
-// (components/announcement-gate.tsx), while this one exists only where there is no session. Folding
-// them together would mean a single row whose audience depends on a boolean, and a mistake there
-// shows the wrong message to the wrong people.
-//
-// BILINGUAL, unlike Announcement. This is the first screen a stranger sees, so it cannot be
-// English-only — and the admin writes both editions themselves, because the alternative is
-// machine-translating marketing copy nobody proofread. An empty Bangla title falls back to the
-// English one at render time rather than showing a blank modal.
-//
-// ONE image for both languages: it is a picture, not prose. Public URL in the existing
-// RentMasterProDocs bucket via /api/admin/uploads with folder 'login-popup' — no new bucket.
-// -------------------------------------------------------------------------------------
-export interface LoginPopup {
-  enabled: boolean;
+export interface PopupItem {
+  id: string;
+  active: boolean;
   titleEn: string;
   titleBn: string;
   bodyEn: string;
   bodyBn: string;
   imageUrl: string | null;
+}
+
+export interface PopupSet {
+  items: PopupItem[];
   updatedAt: string;   // ISO 8601, or '' when never saved
 }
 
-export const DEFAULT_LOGIN_POPUP: LoginPopup = {
-  enabled: false,
-  titleEn: '',
-  titleBn: '',
-  bodyEn: '',
-  bodyBn: '',
-  imageUrl: null,
-  updatedAt: '',
+export const DEFAULT_POPUP_SET: PopupSet = { items: [], updatedAt: '' };
+
+/** Everything a caller may hand us for one item, before it has been through normalisePopupItem. */
+type RawPopupItem = Partial<PopupItem> & {
+  // The pre-list single-object shapes, for the migration below.
+  title?: string;
+  body?: string;
+  enabled?: boolean;
 };
 
-export const getLoginPopup = () => getSetting<LoginPopup>('login_popup', DEFAULT_LOGIN_POPUP);
+const str = (v: unknown) => String(v ?? '').trim();
+
+/**
+ * One item, with every field forced to the right type.
+ *
+ * Also the LEGACY BRIDGE: the single-object announcement had `title`/`body` and no language split,
+ * so those fold into the English edition. Nothing in production carries that shape today, but a row
+ * written between now and the deploy would, and silently dropping what the admin typed is worse
+ * than a few lines of defensiveness.
+ */
+export function normalisePopupItem(raw: RawPopupItem, fallbackId: string): PopupItem {
+  return {
+    id: str(raw.id) || fallbackId,
+    // Legacy `enabled` becomes `active`; a legacy row with neither stays hidden rather than
+    // surprising everyone by appearing the moment this deploys.
+    active: raw.active === undefined ? !!raw.enabled : !!raw.active,
+    titleEn: str(raw.titleEn ?? raw.title),
+    titleBn: str(raw.titleBn),
+    bodyEn: str(raw.bodyEn ?? raw.body),
+    bodyBn: str(raw.bodyBn),
+    imageUrl: raw.imageUrl ? String(raw.imageUrl) : null,
+  };
+}
+
+/** True when an item would render as a blank modal — no words in either language, no picture. */
+export const isPopupEmpty = (i: PopupItem) =>
+  !i.titleEn && !i.titleBn && !i.bodyEn && !i.bodyBn && !i.imageUrl;
+
+/**
+ * Read a popup set, tolerating the pre-list shape.
+ *
+ * A stored value with no `items` array is the old single object. It is wrapped into a one-item list
+ * rather than discarded, so the admin's words survive the shape change.
+ */
+async function getPopupSet(key: string): Promise<PopupSet> {
+  const stored = await getSetting<PopupSet & RawPopupItem>(key, DEFAULT_POPUP_SET as PopupSet & RawPopupItem);
+
+  if (Array.isArray(stored?.items)) {
+    return {
+      items: stored.items.map((i, n) => normalisePopupItem(i, `${key}-${n}`)),
+      updatedAt: str(stored.updatedAt),
+    };
+  }
+
+  // Legacy single object. An entirely empty one is just "never configured".
+  const one = normalisePopupItem(stored || {}, `${key}-0`);
+  if (isPopupEmpty(one)) return { items: [], updatedAt: str(stored?.updatedAt) };
+  return { items: [one], updatedAt: str(stored?.updatedAt) };
+}
+
+export const ANNOUNCEMENT_KEY = 'announcement';
+export const LOGIN_POPUP_KEY = 'login_popup';
+
+export const getAnnouncements = () => getPopupSet(ANNOUNCEMENT_KEY);
+export const getLoginPopups = () => getPopupSet(LOGIN_POPUP_KEY);
+
+/** Only what the public may see: the active items, in order, with the rest gone entirely. */
+export const activePopups = (set: PopupSet): PopupSet => ({
+  items: set.items.filter((i) => i.active),
+  updatedAt: set.updatedAt,
+});
 
 // -------------------------------------------------------------------------------------
 // ANALYTICS — admin-managed Google Analytics / Tag Manager wiring, so the IDs can be
