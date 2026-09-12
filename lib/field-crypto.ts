@@ -64,6 +64,23 @@ export function hasEncryptionKey(): boolean {
   return readKey() !== null;
 }
 
+/**
+ * A key for some OTHER purpose, derived from the same secret. Null when none is configured.
+ *
+ * Exists so a feature that needs a MAC — not encryption — does not have to either invent a second
+ * env var or reach for the raw encryption key. `label` is the domain separator: two labels give
+ * two unrelated keys, so a signature minted for one purpose can never be replayed at another, and
+ * neither can be used to attack the field encryption itself.
+ *
+ * HKDF, not a bare hash of the key, because that is what HKDF is for; the empty salt is fine here
+ * since the input is already a uniformly random 32 bytes rather than a password.
+ */
+export function deriveSubKey(label: string): Buffer | null {
+  const key = readKey();
+  if (!key) return null;
+  return Buffer.from(crypto.hkdfSync('sha256', key, Buffer.alloc(0), Buffer.from(label, 'utf8'), 32));
+}
+
 /** True when a value is in this module's storage format. Cheap check, no key needed. */
 export function isEncrypted(value: string | null | undefined): boolean {
   return typeof value === 'string' && value.startsWith(`${VERSION}:`);

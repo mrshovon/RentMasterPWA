@@ -5,6 +5,7 @@ import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { apiError } from '@/lib/api-response';
 import { checkTierPurchasable, findPendingSubmission, isStaleCheckout } from '@/lib/payments/eligibility';
 import { availablePaymentMethods, currentCredentials, createCharge } from '@/lib/payments/uddoktapay';
+import { cancelQuery } from '@/lib/payments/cancel-token';
 import { resolveAppBaseUrl, resolveApiBaseUrl } from '@/lib/public-url';
 
 // =====================================================================================
@@ -147,7 +148,11 @@ export async function POST(request: NextRequest) {
             tier_id: String(tier.id),
           },
           redirectUrl: `${appBase}/payment/return`,
-          cancelUrl: `${appBase}/payment/cancelled`,
+          // Signed, so the cancel page can act WITHOUT a session. On Android the gateway runs in
+          // Chrome, which holds no session of ours at all — see lib/payments/cancel-token.ts.
+          // Empty query when no encryption key is configured; the page then falls back to the
+          // authenticated route rather than checkout failing over a link decoration.
+          cancelUrl: `${appBase}/payment/cancelled${cancelQuery(submissionId)}`,
           webhookUrl: `${apiBase}/api/payments/uddoktapay/webhook`,
         },
         credentials,
