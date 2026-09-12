@@ -19,6 +19,9 @@ import { apiError } from '@/lib/api-response';
 const GITHUB_OWNER = 'mrshovon';
 const GITHUB_REPO = 'RentMasterPWAUI';
 const UPSTREAM = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
+// Must match APK_ASSET_NAME in the frontend's lib/app-config.ts and the name the release workflow
+// uploads. Duplicated rather than shared because the two repos deploy independently.
+const APK_ASSET_NAME = 'Bari360.apk';
 
 // Cache upstream for 10 minutes. A release the user sees 10 minutes late is fine; being
 // rate-limited into permanent silence is not.
@@ -45,7 +48,13 @@ export async function GET(request: Request) {
     }
 
     const json = await res.json();
-    const asset = (json.assets || []).find((a: any) => /\.apk$/i.test(a.name));
+    // Prefer the asset we deliberately name over whichever .apk GitHub happens to list first. The
+    // release also carries a legacy `app-release.apk`, which sorts earlier, so the plain `.find`
+    // was handing every in-app updater the wrong one of two identical files. Harmless while they
+    // match; wrong the moment they do not.
+    const assets = (json.assets || []) as any[];
+    const asset =
+      assets.find((a) => a?.name === APK_ASSET_NAME) || assets.find((a) => /\.apk$/i.test(a?.name));
 
     // Only the fields the client needs — no need to relay GitHub's full payload.
     return NextResponse.json(
