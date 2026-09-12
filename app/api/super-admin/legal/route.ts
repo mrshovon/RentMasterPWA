@@ -88,7 +88,7 @@ export async function PATCH(request: NextRequest) {
     const lang = parseLang(body.lang);
     if (!doc || !lang) {
       return NextResponse.json(
-        { success: false, error: 'doc must be "privacy" or "terms" and lang must be "en" or "bn".' },
+        { success: false, error: 'doc must be "privacy", "terms" or "about", and lang must be "en" or "bn".' },
         { status: 400 }
       );
     }

@@ -184,6 +184,45 @@ export const DEFAULT_ANNOUNCEMENT: Announcement = {
 export const getAnnouncement = () => getSetting<Announcement>('announcement', DEFAULT_ANNOUNCEMENT);
 
 // -------------------------------------------------------------------------------------
+// LOGIN POPUP — the same idea as the announcement above, on the SIGNED-OUT side.
+//
+// A sibling rather than a flag on Announcement, because the two are opposites in the one way that
+// matters: the announcement gate requires a session and skips '/' outright
+// (components/announcement-gate.tsx), while this one exists only where there is no session. Folding
+// them together would mean a single row whose audience depends on a boolean, and a mistake there
+// shows the wrong message to the wrong people.
+//
+// BILINGUAL, unlike Announcement. This is the first screen a stranger sees, so it cannot be
+// English-only — and the admin writes both editions themselves, because the alternative is
+// machine-translating marketing copy nobody proofread. An empty Bangla title falls back to the
+// English one at render time rather than showing a blank modal.
+//
+// ONE image for both languages: it is a picture, not prose. Public URL in the existing
+// RentMasterProDocs bucket via /api/admin/uploads with folder 'login-popup' — no new bucket.
+// -------------------------------------------------------------------------------------
+export interface LoginPopup {
+  enabled: boolean;
+  titleEn: string;
+  titleBn: string;
+  bodyEn: string;
+  bodyBn: string;
+  imageUrl: string | null;
+  updatedAt: string;   // ISO 8601, or '' when never saved
+}
+
+export const DEFAULT_LOGIN_POPUP: LoginPopup = {
+  enabled: false,
+  titleEn: '',
+  titleBn: '',
+  bodyEn: '',
+  bodyBn: '',
+  imageUrl: null,
+  updatedAt: '',
+};
+
+export const getLoginPopup = () => getSetting<LoginPopup>('login_popup', DEFAULT_LOGIN_POPUP);
+
+// -------------------------------------------------------------------------------------
 // ANALYTICS — admin-managed Google Analytics / Tag Manager wiring, so the IDs can be
 // changed from the admin panel without a redeploy.
 //
@@ -344,10 +383,14 @@ export async function setUddoktaPayConfig(
 // second parser here is how the saved text and the compiled text would come to render
 // differently, which for a legal document is the one failure that matters.
 // -------------------------------------------------------------------------------------
-export type LegalDocName = 'privacy' | 'terms';
+// 'about' rides this pipeline rather than getting its own: it is the same problem (a long
+// bilingual document the admin must be able to edit without a deploy) and a second mechanism would
+// be a second thing to keep working. It is NOT consented-to, though — see terms_version below,
+// which About deliberately does not touch.
+export type LegalDocName = 'privacy' | 'terms' | 'about';
 export type LegalLang = 'en' | 'bn';
 
-export const LEGAL_DOC_NAMES: LegalDocName[] = ['privacy', 'terms'];
+export const LEGAL_DOC_NAMES: LegalDocName[] = ['privacy', 'terms', 'about'];
 export const LEGAL_LANGS: LegalLang[] = ['en', 'bn'];
 
 /** Guards against an arbitrary settings key being reachable through a query parameter. */
