@@ -1,5 +1,6 @@
 import { supabaseAdminEngine } from './supabase-server';
 import { encryptField, decryptField, hasEncryptionKey } from './field-crypto';
+import { FONT_ID_RE, fontFormatFor, isSafeFontUrl, type FontFormat } from './font-validate';
 
 // =====================================================================================
 // APP SETTINGS — tiny key/value store for platform-wide admin config (app_settings table).
@@ -290,6 +291,140 @@ export const isContainerId = (v: string) => /^GTM-[A-Z0-9]{4,20}$/.test(v);
 
 export const getAnalyticsConfig = () =>
   getSetting<AnalyticsConfig>('analytics_config', DEFAULT_ANALYTICS_CONFIG);
+
+// -------------------------------------------------------------------------------------
+// FONTS — the typeface the whole app renders in, for both scripts, set from the admin panel.
+//
+// Two slots, because this app has two: `body` drives Tailwind's font-sans (which sits on
+// <body> and therefore reaches everything), `heading` drives font-display (banner titles,
+// metric values, hub-tile labels). One slot would have left the most prominent text in the
+// app unmoved when the admin changed the font, which reads as a broken feature.
+//
+// Each slot names a LATIN face and a BENGALI face. There is no :lang() rule and no coupling
+// to the language toggle: Bengali codepoints are absent from Latin faces, so a single stack
+// ("Inter", "Hind Siliguri", ui-sans-serif) splits itself per glyph. That is the only
+// approach that renders a MIXED string correctly, and this app is full of them — every money
+// figure is a Bengali ৳ (U+09F3) followed by Western digits, in both languages, by the
+// decision recorded in lib/format.ts.
+//
+// WHAT IS STORED IS IDS, not family names. The catalogue of real families lives in the UI
+// repo (lib/font-catalog.ts), which is the only place that builds CSS; here we keep the id
+// allow-list so a family that is not on it can never be saved. If the two drift, the
+// frontend treats an id it does not know as "unset" — drift can make a font unavailable, it
+// can never make one unsafe.
+//
+// A CUSTOM face is a URL plus a format, declared under one of the four fixed family names in
+// lib/font-validate.ts. The admin never supplies a family name, so there is nothing to
+// sanitise: `font-family` can only ever be a string we wrote.
+// -------------------------------------------------------------------------------------
+
+/** A face the admin supplied — uploaded to our bucket, or a pasted https URL. */
+export interface CustomFont {
+  url: string;              // https, validated by isSafeFontUrl()
+  format: FontFormat;       // derived server-side from the URL, never taken from the body
+  originalName: string;     // for the admin UI only; NEVER interpolated into CSS
+}
+
+/** One typographic slot: what to use for Latin, what for Bengali, plus optional custom faces. */
+export interface FontSlot {
+  latinId: string;              // catalogue id, or '' to leave the built-in default
+  banglaId: string;             // catalogue id, or '' to leave the built-in default
+  customLatin: CustomFont | null;   // takes precedence over latinId
+  customBangla: CustomFont | null;  // takes precedence over banglaId
+}
+
+export interface FontConfig {
+  body: FontSlot;
+  heading: FontSlot;
+  /** ISO 8601, stamped on save. '' when never configured. Doubles as the client cache key. */
+  updatedAt: string;
+}
+
+const EMPTY_FONT_SLOT: FontSlot = { latinId: '', banglaId: '', customLatin: null, customBangla: null };
+
+/** Nothing configured = exactly what the app rendered before this feature existed. */
+export const DEFAULT_FONT_CONFIG: FontConfig = {
+  body: { ...EMPTY_FONT_SLOT },
+  heading: { ...EMPTY_FONT_SLOT },
+  updatedAt: '',
+};
+
+/**
+ * The ids the UI catalogue offers. Ids only — see the note above.
+ * Mirror of LATIN_FONTS / BANGLA_FONTS in rent-master-pwa-ui/lib/font-catalog.ts.
+ */
+export const CURATED_LATIN_IDS = new Set([
+  'inter', 'roboto', 'open-sans', 'lato', 'montserrat', 'poppins', 'nunito-sans',
+  'work-sans', 'source-sans-3', 'dm-sans', 'figtree', 'outfit', 'rubik', 'public-sans',
+  'plus-jakarta-sans', 'manrope', 'merriweather', 'lora',
+]);
+
+export const CURATED_BANGLA_IDS = new Set([
+  'shadhinata-2', 'noto-sans-bengali', 'noto-serif-bengali', 'anek-bangla',
+  'hind-siliguri', 'baloo-da-2', 'atma', 'mina', 'tiro-bangla',
+]);
+
+/** Coerce anything a caller sends into a CustomFont, or null. Fails closed. */
+function normaliseCustomFont(raw: unknown): CustomFont | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Partial<CustomFont>;
+  if (!isSafeFontUrl(r.url)) return null;
+  const format = fontFormatFor(r.url);
+  if (!format) return null;
+  return {
+    url: r.url,
+    // Derived here, never trusted from the request: the format token goes straight into CSS.
+    format,
+    originalName: String(r.originalName || '').slice(0, 120),
+  };
+}
+
+/** Coerce one slot. An id that is not in the allow-list is dropped, not rejected. */
+function normaliseFontSlot(raw: unknown, allowedLatin: Set<string>, allowedBangla: Set<string>): FontSlot {
+  const r = (raw && typeof raw === 'object' ? raw : {}) as Partial<FontSlot>;
+  const pick = (v: unknown, allowed: Set<string>) => {
+    const s = String(v || '').trim().toLowerCase();
+    return FONT_ID_RE.test(s) && allowed.has(s) ? s : '';
+  };
+  return {
+    latinId: pick(r.latinId, allowedLatin),
+    banglaId: pick(r.banglaId, allowedBangla),
+    customLatin: normaliseCustomFont(r.customLatin),
+    customBangla: normaliseCustomFont(r.customBangla),
+  };
+}
+
+/** Normalise a whole config off the wire. Everything invalid becomes "unset". */
+export function normaliseFontConfig(raw: unknown): FontConfig {
+  const r = (raw && typeof raw === 'object' ? raw : {}) as Partial<FontConfig>;
+  return {
+    body: normaliseFontSlot(r.body, CURATED_LATIN_IDS, CURATED_BANGLA_IDS),
+    heading: normaliseFontSlot(r.heading, CURATED_LATIN_IDS, CURATED_BANGLA_IDS),
+    updatedAt: '',
+  };
+}
+
+/** True when the config is indistinguishable from "never configured". */
+export function isDefaultFontConfig(c: FontConfig): boolean {
+  const empty = (s: FontSlot) => !s.latinId && !s.banglaId && !s.customLatin && !s.customBangla;
+  return empty(c.body) && empty(c.heading);
+}
+
+export const getFontConfig = () => getSetting<FontConfig>('font_config', DEFAULT_FONT_CONFIG);
+
+/**
+ * Write the config, stamping updatedAt. Resetting to the default clears the stamp too, so a
+ * client that has cached a configuration can tell "back to default" from "never set" — both
+ * mean the same thing to the renderer, which is the point.
+ */
+export async function setFontConfig(next: FontConfig): Promise<FontConfig> {
+  const stored: FontConfig = {
+    ...next,
+    updatedAt: isDefaultFontConfig(next) ? '' : new Date().toISOString(),
+  };
+  await setSetting('font_config', stored);
+  return stored;
+}
 
 // -------------------------------------------------------------------------------------
 // BREVO — admin-managed transactional email, so the account can be connected (or swapped,

@@ -4,6 +4,9 @@
 -- Rows used so far:
 --   payment_config       -- { provider, walletNumber, instructions, qrUrl } for the manual MFS payment screen
 --   default_signup_tier  -- { tierId } given to newly self-signed-up owners (default: free)
+--   font_config          -- { body, heading, updatedAt } the system typeface for both scripts
+--
+-- (that list is not exhaustive any more; lib/app-settings.ts is the authoritative one)
 --
 -- There was no global settings table before (the only "settings" were per-owner, in auth
 -- user_metadata). Everything here is app-wide and admin-managed via /api/super-admin/*.
