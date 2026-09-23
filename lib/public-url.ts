@@ -71,3 +71,19 @@ export function resolveApiBaseUrl(request: { headers: Headers; url: string }): s
 export function resolveResetUrl(request?: { headers: Headers } | null): string {
   return `${resolveAppBaseUrl(request)}/reset-password`;
 }
+
+/**
+ * Is this a loopback address? True for localhost, 127.0.0.1 and ::1, on any port.
+ *
+ * Used to catch the one failure this module exists to prevent: a link that is mailed to a real
+ * person and points at their own machine. Locally that is correct and expected; in a deployed
+ * environment it means PUBLIC_APP_URL was never set and every link we send is dead.
+ */
+export function isLocalUrl(url: string): boolean {
+  try {
+    const { hostname } = new URL(url);
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === '::1';
+  } catch {
+    return false;
+  }
+}
