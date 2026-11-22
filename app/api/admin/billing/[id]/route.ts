@@ -176,6 +176,22 @@ export async function PATCH(
       }
 
       updatedLedgerRecord = await recalcLedger(billingRecordId);
+
+      // Close any claim the tenant submitted for this invoice. The payment row above is still the
+      // only thing that changed money; this just stops the owner's "awaiting confirmation" queue
+      // from showing a bill that has already been dealt with. Non-fatal before the SQL is run.
+      try {
+        const { data: openClaims } = await supabaseAdminEngine
+          .from('payment_claims').select('id')
+          .eq('source', 'rent').eq('ref_id', billingRecordId).eq('status', 'pending');
+        if (openClaims?.length) {
+          await supabaseAdminEngine.from('payment_claims').update({
+            status: paymentStatus === 'paid' ? 'confirmed' : 'dismissed',
+            resolved_at: new Date().toISOString(),
+            resolved_by: ownerId,
+          }).in('id', openClaims.map((c: any) => c.id));
+        }
+      } catch { /* payment-claims table not provisioned yet */ }
     } else {
       // 'sent' — a claim, not a record of money. Written directly, scoped strictly to the
       // caller's own data: tenant callers only their own bill, owners only bills they created.

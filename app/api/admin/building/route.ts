@@ -10,6 +10,7 @@ import {
   countActiveBuildingOwners,
   BUILDING_SELECT,
 } from '@/lib/building';
+import { normalizePayTo, EMPTY_PAY_TO } from '@/lib/payment-claims';
 
 // =====================================================================================
 // 🏢 BUILDING ADMIN — MY BUILDING
@@ -28,8 +29,26 @@ export async function GET(request: NextRequest) {
 
     const ownerCount = await countActiveBuildingOwners(gate.building!.id);
 
+    // Separate, error-tolerant read: naming these columns in BUILDING_SELECT would 42703 every
+    // building route before ADD_PAYMENT_CLAIMS.sql is run. Until then, payers simply get defaults.
+    let serviceChargePayTo = EMPTY_PAY_TO;
+    const { data: payToRow, error: payToErr } = await supabaseAdminEngine
+      .from('buildings')
+      .select('service_charge_pay_to, service_charge_qr_url, service_charge_instructions, service_charge_methods, service_charge_default_method')
+      .eq('id', gate.building!.id)
+      .maybeSingle();
+    if (!payToErr && payToRow) {
+      serviceChargePayTo = normalizePayTo({
+        account: payToRow.service_charge_pay_to,
+        qrUrl: payToRow.service_charge_qr_url,
+        instructions: payToRow.service_charge_instructions,
+        methods: payToRow.service_charge_methods,
+        defaultMethod: payToRow.service_charge_default_method,
+      });
+    }
+
     return NextResponse.json(
-      { success: true, data: { ...gate.building!, owner_count: ownerCount } },
+      { success: true, data: { ...gate.building!, owner_count: ownerCount, serviceChargePayTo } },
       { status: 200 }
     );
   } catch (err) {
@@ -64,7 +83,15 @@ export async function PATCH(request: NextRequest) {
       .eq('id', gate.building!.id)
       .select(BUILDING_SELECT)
       .single();
-    if (error) throw error;
+    if (error) {
+      if (error.code === '42703' || error.code === 'PGRST204') {
+        return NextResponse.json({
+          success: false,
+          error: 'Payment setup needs ADD_PAYMENT_CLAIMS.sql to be run in the Supabase SQL editor first.',
+        }, { status: 409 });
+      }
+      throw error;
+    }
 
     return NextResponse.json({ success: true, data }, { status: 200 });
   } catch (err) {

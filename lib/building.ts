@@ -1,5 +1,6 @@
 import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from './supabase-server';
+import { normalizePayTo } from './payment-claims';
 
 // =====================================================================================
 // 🏢 WHOLE BUILDING — the building admin role and the building/owner roster.
@@ -65,6 +66,10 @@ export interface BuildingMembership {
   defaultServiceCharge: number;
 }
 
+// Deliberately does NOT include the pay-to columns added by ADD_PAYMENT_CLAIMS.sql: a column list
+// naming a not-yet-created column is a 42703 on PostgREST and would take the WHOLE building
+// console down for everyone between deploy and the SQL run. Only the two read routes that need
+// those columns ask for them, with an error-tolerant fallback.
 export const BUILDING_SELECT =
   'id, building_no, admin_id, name, house_no, address, city, letterhead_url, signatory_name, signatory_title, notes, is_active, created_at, updated_at';
 
@@ -350,6 +355,18 @@ export function buildingFieldsFrom(body: Record<string, unknown>): Record<string
   text('signatoryName', 'signatory_name', 200);
   text('signatoryTitle', 'signatory_title', 200);
   text('notes', 'notes', 2000);
+
+  // Where flat owners send service charge. One object in, five columns out; normalised here so
+  // an unknown method or an out-of-range default can never be stored. ADD_PAYMENT_CLAIMS.sql is
+  // what creates these columns — the PATCH route turns a 42703 into a clear "run the SQL" error.
+  if (body.serviceChargePayTo !== undefined && body.serviceChargePayTo !== null) {
+    const p = normalizePayTo(body.serviceChargePayTo);
+    out.service_charge_pay_to = p.account;
+    out.service_charge_qr_url = p.qrUrl;
+    out.service_charge_instructions = p.instructions;
+    out.service_charge_methods = p.methods;
+    out.service_charge_default_method = p.defaultMethod;
+  }
 
   if (Object.keys(out).length) out.updated_at = new Date().toISOString();
   return out;

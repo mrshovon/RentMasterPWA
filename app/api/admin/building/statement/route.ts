@@ -4,6 +4,7 @@ import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { apiError } from '@/lib/api-response';
 import { buildingMembershipOf, flatsOfOwner, BUILDING_SELECT, type BuildingRow } from '@/lib/building';
 import { INVOICE_SELECT } from '@/lib/building-billing';
+import { listClaims, normalizePayTo, EMPTY_PAY_TO } from '@/lib/payment-claims';
 
 // =====================================================================================
 // 🧾 FLAT OWNER — MY SERVICE CHARGE STATEMENT
@@ -77,7 +78,26 @@ export async function GET(request: NextRequest) {
       }, {});
     }
 
-    const shaped = (invoices || []).map((i: any) => ({ ...i, payments: byInvoice[String(i.id)] || [] }));
+    // Each invoice's open claim, if any. This is what the flat-owner UI shows as
+    // "sent — awaiting confirmation" — the invoice's own DB status stays unpaid on purpose.
+    let claimsByInvoice: Record<string, any> = {};
+    try {
+      const claims = await listClaims({ payerId: uid, source: 'service_charge' });
+      claimsByInvoice = claims
+        .filter((c) => c.status === 'pending')
+        .reduce((acc: Record<string, any>, c) => {
+          acc[String(c.ref_id)] = c;
+          return acc;
+        }, {});
+    } catch {
+      /* before ADD_PAYMENT_CLAIMS.sql, there are simply no claims to show */
+    }
+
+    const shaped = (invoices || []).map((i: any) => ({
+      ...i,
+      payments: byInvoice[String(i.id)] || [],
+      claim: claimsByInvoice[String(i.id)] || null,
+    }));
 
     // --- The printable identity ------------------------------------------------------------
     // Both lookups are best-effort and independent. A receipt with no letterhead, or with the
@@ -93,6 +113,28 @@ export async function GET(request: NextRequest) {
       buildingRow = (data as BuildingRow) || null;
     } catch {
       /* non-fatal — the receipt falls back to the building's name alone */
+    }
+
+    // Where this flat owner should send their service charge. Separate guarded read for the same
+    // reason as the admin's own GET: no 42703 before ADD_PAYMENT_CLAIMS.sql is run.
+    let serviceChargePayTo = EMPTY_PAY_TO;
+    try {
+      const { data: payToRow, error: payToErr } = await supabaseAdminEngine
+        .from('buildings')
+        .select('service_charge_pay_to, service_charge_qr_url, service_charge_instructions, service_charge_methods, service_charge_default_method')
+        .eq('id', membership.buildingId)
+        .maybeSingle();
+      if (!payToErr && payToRow) {
+        serviceChargePayTo = normalizePayTo({
+          account: payToRow.service_charge_pay_to,
+          qrUrl: payToRow.service_charge_qr_url,
+          instructions: payToRow.service_charge_instructions,
+          methods: payToRow.service_charge_methods,
+          defaultMethod: payToRow.service_charge_default_method,
+        });
+      }
+    } catch {
+      /* no pay-to details yet — payer sees the default methods with a "contact admin" hint */
     }
 
     // The signature lives on the BUILDING ADMIN's auth user_metadata, not on the buildings row
@@ -124,6 +166,7 @@ export async function GET(request: NextRequest) {
           signatoryName: buildingRow?.signatory_name ?? null,
           signatoryTitle: buildingRow?.signatory_title ?? null,
           signatureUrl,
+          serviceChargePayTo,
         },
         // Every flat this owner holds. `building.unitLabel` above stays populated from the
         // membership (their primary) so anything still reading the scalar keeps working; screens

@@ -110,6 +110,21 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
     const refreshed = await recalcBuildingInvoice(id);
 
+    // The claim is a message, not the money — this POST is the money. Close the flat owner's
+    // "sent" claim now so the admin's queue matches the invoice. Non-fatal before the SQL runs.
+    try {
+      const { data: openClaims } = await supabaseAdminEngine
+        .from('payment_claims').select('id')
+        .eq('source', 'service_charge').eq('ref_id', id).eq('status', 'pending');
+      if (openClaims?.length) {
+        await supabaseAdminEngine.from('payment_claims').update({
+          status: 'confirmed',
+          resolved_at: new Date().toISOString(),
+          resolved_by: gate.uid,
+        }).in('id', openClaims.map((c: any) => c.id));
+      }
+    } catch { /* payment-claims table not provisioned yet */ }
+
     // Income into the building's books. source is 'billing' rather than a new value so the
     // account_transactions CHECK constraint stays untouched; source_ref is the PAYMENT id, which
     // is a fresh uuid and so can never collide with a rent ledger's.
