@@ -6,12 +6,15 @@ import { getPresenceFor } from '@/lib/presence';
 import { apiError } from '@/lib/api-response';
 import { ownedBuilding, buildingMembershipOf, countActiveBuildingOwners, buildingOwnerIds, forgetBuildingMembership } from '@/lib/building';
 import { purgeOwnerAccount } from '@/lib/account-purge';
+import { changeOwnerEmail } from '@/lib/email-change';
+import { selfEmailChangeEnabled, setSelfEmailChange } from '@/lib/email-change-flag';
+import { resolveAppBaseUrl } from '@/lib/public-url';
 
 // =====================================================================================
 // 🛡️ ADMIN — SINGLE OWNER
 // GET    -> full details (auth + profile + subscription + property/tenant counts)
-// PATCH  -> edit details / reset password / suspend|reactivate / revoke|grant permission
-//           / cancel subscription
+// PATCH  -> edit details / change sign-in email / reset password / suspend|reactivate /
+//           revoke|grant permission / toggle the self-service email opt-in / cancel subscription
 // DELETE -> remove the account
 // =====================================================================================
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -52,6 +55,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       .eq('owner_id', id)
       .eq('addon_key', 'accounts')
       .maybeSingle();
+
+    // Reserved add-on flag: may the account holder change their own sign-in email?
+    // One-shot — a successful self-service change switches it back off (lib/email-change).
+    const selfEmailChange = await selfEmailChangeEnabled(id);
 
     let staffIncludedInPlan = false;
     let accountsIncludedInPlan = false;
@@ -109,6 +116,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         accounts_addon: !!accountsAddonRow?.enabled,
         accounts_addon_granted_at: accountsAddonRow?.granted_at || null,
         accounts_included_in_plan: accountsIncludedInPlan,
+        email_change_allowed: selfEmailChange,
         propertyCount: propertyIds.length,
         tenantCount,
         building: runsBuilding
@@ -127,7 +135,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   try {
     const { id } = await params;
     const body = await request.json();
-    const { action, name, phone, password } = body;
+    const { action, name, phone, password, email } = body;
 
     const { data: cur } = await supabaseAdminEngine.auth.admin.getUserById(id);
     const meta = ((cur?.user?.user_metadata as any) || {});
@@ -172,6 +180,17 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       });
     }
 
+    // Self-service email opt-in. One-shot: the account holder's own change clears it again.
+    // Same store as the add-ons (service-role only), but not a paid module — see lib/email-change-flag.
+    if (action === 'enable_self_email_change' || action === 'disable_self_email_change') {
+      const enabled = action === 'enable_self_email_change';
+      await setSelfEmailChange(id, enabled, request.headers.get('x-rentmaster-uid'));
+      return NextResponse.json({
+        success: true,
+        message: `Self-service email change ${enabled ? 'enabled' : 'disabled'}.`,
+      });
+    }
+
     if (action === 'cancel_subscription') {
       const { data: latest } = await supabaseAdminEngine
         .from('subscription_history').select('id').eq('owner_id', id)
@@ -200,6 +219,29 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       // has to relay the new password out-of-band, but the account holder gets told regardless.
       void notifyPasswordChanged({ ownerId: id, ownerEmail: cur?.user?.email || null, byAdmin: true, ip });
       return NextResponse.json({ success: true, message: 'Password reset successfully.' });
+    }
+
+    // --- Change the sign-in email ---
+    // Checked before the generic edit branch so an email-only payload can never be mistaken for
+    // a name/phone edit that silently ignores it. System logins and duplicate addresses are
+    // rejected by the shared helper; every failure keeps a stable `code` for the admin UI.
+    if (email !== undefined) {
+      const result = await changeOwnerEmail({
+        request,
+        ownerId: id,
+        newEmail: String(email),
+        actor: 'admin',
+        oldEmail: cur?.user?.email || null,
+        appUrl: resolveAppBaseUrl(request),
+      });
+      if (!result.ok) {
+        return NextResponse.json({ success: false, error: result.error, code: result.code }, { status: result.status });
+      }
+      return NextResponse.json({
+        success: true,
+        message: 'Sign-in email changed.',
+        data: { email: result.email, oldEmail: result.oldEmail },
+      });
     }
 
     // --- Edit details ---

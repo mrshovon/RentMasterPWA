@@ -3,20 +3,24 @@ import type { NextRequest } from 'next/server';
 import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { validatePhone } from '@/lib/validate';
 import { apiError } from '@/lib/api-response';
+import { selfEmailChangeEnabled } from '@/lib/email-change-flag';
 
 // =====================================================================================
 // 👤 ACCOUNT PROFILE — owner AND super-admin self-service (both are Supabase auth users).
-// GET   -> { email, name, phone, role }
+// GET   -> { email, name, phone, role, emailChangeAllowed }
 // PATCH { name?, phone? } -> merged into user_metadata.
 //
 // Lives under /api/admin/ so middleware authenticates the caller and injects x-rentmaster-uid;
 // the route keys off that alone, exactly like the sibling owner/password and owner/settings
 // routes, which is what makes it work for the admin too.
 //
-// EMAIL IS READ-ONLY. It is returned so the UI can show which account is signed in, and is
-// never read from the request body: changing a login address needs a verification flow
-// (confirm-new-address / re-auth) that does not exist here, and silently rewriting it with the
-// service role would let one bad request lock someone out of their own account.
+// EMAIL IS READ-ONLY HERE. It is returned so the UI can show which account is signed in, and is
+// never read from this route's body. Changing it is a separate, deliberate flow:
+//   - a super admin changes it in Admin → Owners (lib/email-change.ts), or
+//   - the account holder uses POST /api/admin/owner/email, but ONLY when a super admin has
+//     switched on the one-shot opt-in (owner_addons / lib/email-change-flag.ts) and has
+//     re-authenticated with the current password.
+// `emailChangeAllowed` tells the Settings card whether to show that second path.
 //
 // NOTE: assertOwnerCanWrite is deliberately NOT applied. That guard rejects owners whose
 // subscription has lapsed — correct for creating properties, wrong here. Fixing a typo in your
@@ -47,6 +51,7 @@ export async function GET(request: NextRequest) {
         name: meta.name ?? null,
         phone: meta.phone ?? user.phone ?? null,
         role: meta.role || 'owner',
+        emailChangeAllowed: await selfEmailChangeEnabled(uid),
       },
     }, { status: 200 });
   } catch (err) {
@@ -105,6 +110,7 @@ export async function PATCH(request: NextRequest) {
         name: meta.name ?? null,
         phone: meta.phone ?? null,
         role: meta.role || 'owner',
+        emailChangeAllowed: await selfEmailChangeEnabled(uid),
       },
     }, { status: 200 });
   } catch (err) {

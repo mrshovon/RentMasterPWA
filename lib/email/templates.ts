@@ -158,6 +158,74 @@ export function passwordChanged(args: {
 }
 
 // -------------------------------------------------------------------------------------
+// 2b. Sign-in email changed — also a security notice, and goes to BOTH addresses.
+// -------------------------------------------------------------------------------------
+export function emailChanged(args: {
+  name: string;
+  oldEmail: string;
+  newEmail: string;
+  at: string;              // already-formatted, human-readable
+  ip?: string | null;
+  byAdmin?: boolean;
+  appUrl?: string;
+}): EmailBody {
+  const name = esc(args.name || 'there');
+  const oldEmail = esc(args.oldEmail);
+  const newEmail = esc(args.newEmail);
+  const at = esc(args.at);
+  const where = args.ip ? ` (from ${esc(args.ip)})` : '';
+
+  const who = args.byAdmin
+    ? 'A Bari360 administrator changed the sign-in email on your account'
+    : 'The sign-in email on your Bari360 account was changed';
+  const whoBn = args.byAdmin
+    ? 'একজন Bari360 প্রশাসক আপনার অ্যাকাউন্টের সাইন-ইন ইমেইল পরিবর্তন করেছেন'
+    : 'আপনার Bari360 অ্যাকাউন্টের সাইন-ইন ইমেইল পরিবর্তন করা হয়েছে';
+  const cta = args.appUrl
+    ? button(esc(args.appUrl), 'Open Bari360')
+    : '';
+  const ctaBn = args.appUrl
+    ? button(esc(args.appUrl), 'Bari360 খুলুন')
+    : '';
+
+  return {
+    subject: 'Your Bari360 sign-in email changed / আপনার সাইন-ইন ইমেইল পরিবর্তিত হয়েছে',
+    html: wrap(`
+      ${h('Sign-in email changed')}
+      ${p(`Hi ${name}, ${who} from <strong>${oldEmail}</strong> to <strong>${newEmail}</strong> on ${at}${where}.`)}
+      ${p('From now on, sign in with <strong>the new address</strong> and the same password.')}
+      ${p('<strong>If this was you, nothing more is needed.</strong>')}
+      ${p('If it was not, contact support immediately — your account may have been taken over.')}
+      ${cta}
+      ${divider}
+      ${h('সাইন-ইন ইমেইল পরিবর্তিত হয়েছে')}
+      ${p(`প্রিয় ${name}, ${at}${where} তারিখে ${whoBn} — পুরোনো <strong>${oldEmail}</strong> থেকে নতুন <strong>${newEmail}</strong> ঠিকানায়।`)}
+      ${p('এখন থেকে নতুন ঠিকানা এবং একই পাসওয়ার্ড দিয়ে সাইন ইন করুন।')}
+      ${p('<strong>আপনি নিজে করে থাকলে আর কিছু করার দরকার নেই।</strong>')}
+      ${p('আপনি না করে থাকলে অবিলম্বে সহায়তা কেন্দ্রে জানান — আপনার অ্যাকাউন্ট অন্য কেউ নিয়ে নিতে পারে।')}
+      ${ctaBn}
+    `),
+    text: [
+      'Sign-in email changed',
+      '',
+      `Hi ${args.name || 'there'}, ${who} from ${args.oldEmail} to ${args.newEmail} on ${args.at}${args.ip ? ` (from ${args.ip})` : ''}.`,
+      'From now on, sign in with the new address and the same password.',
+      'If this was you, nothing more is needed.',
+      'If it was not, contact support immediately — your account may have been taken over.',
+      args.appUrl || '',
+      '',
+      '---',
+      '',
+      'সাইন-ইন ইমেইল পরিবর্তিত হয়েছে',
+      '',
+      `প্রিয় ${args.name || ''}, ${args.at} তারিখে ${whoBn}: ${args.oldEmail} → ${args.newEmail}।`,
+      'এখন থেকে নতুন ঠিকানা এবং একই পাসওয়ার্ড দিয়ে সাইন ইন করুন।',
+      'আপনি না করে থাকলে অবিলম্বে সহায়তা কেন্দ্রে জানান।',
+    ].join('\n'),
+  };
+}
+
+// -------------------------------------------------------------------------------------
 // 3. Password reset link
 // -------------------------------------------------------------------------------------
 export function passwordReset(args: {
