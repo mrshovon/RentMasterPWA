@@ -19,7 +19,8 @@ const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'imag
 // more often than as photos. Every other surface stays image-only on purpose: a PDF uploaded as
 // the owner's signature or as the bKash QR would render as a broken image on the receipt and the
 // payment screen, and neither of those has a client-side type check to stop it getting that far.
-const PDF_FOLDERS = ['documents'];
+// Email attachments are documents a human will open, so PDFs belong there too — but nowhere else.
+const PDF_FOLDERS = ['documents', 'email-attachments'];
 
 // FONTS are their own branch further down, not another entry in the list above, because for
 // a font neither the browser's Content-Type nor a MIME allow-list is trustworthy: Chrome

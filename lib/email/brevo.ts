@@ -24,12 +24,19 @@ import { isSystemLogin } from '../validate';
 const BREVO_ENDPOINT = 'https://api.brevo.com/v3/smtp/email';
 const TIMEOUT_MS = 10_000;
 
+/** Brevo wants base64 content and a display name, not a URL — the sender fetches the file. */
+export interface EmailAttachment {
+  name: string;
+  content: string; // base64
+}
+
 export interface SendEmailInput {
   to: string;
   toName?: string | null;
   subject: string;
   html: string;
   text: string;
+  attachments?: EmailAttachment[];
 }
 
 /** The config plus its decrypted key, or null when email is not usable right now. */
@@ -93,6 +100,7 @@ export async function sendEmail(input: SendEmailInput): Promise<boolean> {
         subject: input.subject,
         htmlContent: input.html,
         textContent: input.text,
+        ...(input.attachments?.length ? { attachment: input.attachments } : {}),
       }),
       signal: abort.signal,
     });

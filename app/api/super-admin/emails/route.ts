@@ -32,6 +32,59 @@ const MAX_SUBJECT = 200;
 const MAX_BODY = 5000;
 const BATCH_SIZE = 10;
 
+// Attachments are uploaded through /api/admin/uploads into this one folder. The send request
+// carries STORAGE PATHS, never URLs: a caller-supplied URL would be an SSRF primitive, and this
+// way the only files we can attach are ones this app put in its own bucket.
+const ATTACHMENT_FOLDER = 'email-attachments';
+const STORAGE_BUCKET = 'RentMasterProDocs';
+const MAX_ATTACHMENTS = 3;
+const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+const MAX_ATTACHMENT_TOTAL = 8 * 1024 * 1024;
+const ATTACHMENT_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'pdf'];
+
+interface AttachmentInput { path: string; name: string }
+interface PreparedAttachment { name: string; content: string }
+
+/**
+ * Download + base64-encode every attachment ONCE, before any mail is sent. A bad file therefore
+ * fails the whole compose with a clear message rather than emailing half the recipients a mail
+ * whose attachment is missing.
+ */
+async function prepareAttachments(raw: any): Promise<PreparedAttachment[]> {
+  const list: AttachmentInput[] = Array.isArray(raw) ? raw : [];
+  if (!list.length) return [];
+  if (list.length > MAX_ATTACHMENTS) {
+    throw new Error(`Attach at most ${MAX_ATTACHMENTS} files.`);
+  }
+
+  const out: PreparedAttachment[] = [];
+  let total = 0;
+  for (const item of list) {
+    const path = String(item?.path || '');
+    const ext = path.includes('.') ? path.split('.').pop()!.toLowerCase() : '';
+    if (!path.startsWith(`${ATTACHMENT_FOLDER}/`) || path.includes('..') || !ATTACHMENT_EXTS.includes(ext)) {
+      throw new Error('An attachment is not a supported image or PDF uploaded for email.');
+    }
+    // UUID filenames are unhelpful in an inbox; the caller sends the original name as metadata.
+    const name = String(item?.name || 'attachment')
+      .replace(/[^\w.\- ()]/g, '').trim().slice(0, 120) || 'attachment';
+
+    const { data: blob, error } = await supabaseAdminEngine.storage.from(STORAGE_BUCKET).download(path);
+    if (error || !blob) throw new Error(`Could not read the attachment "${name}". Please upload it again.`);
+
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    if (bytes.byteLength > MAX_ATTACHMENT_BYTES) {
+      throw new Error(`"${name}" is over the 5MB per-file limit.`);
+    }
+    total += bytes.byteLength;
+    if (total > MAX_ATTACHMENT_TOTAL) {
+      throw new Error('Attachments exceed 8MB in total.');
+    }
+    out.push({ name, content: Buffer.from(bytes).toString('base64') });
+  }
+  return out;
+}
+
 interface Recipient {
   email: string;
   name: string | null;
@@ -140,6 +193,14 @@ export async function POST(request: NextRequest) {
       }, { status: 409 });
     }
 
+    // Prepare files before any mail goes out — a bad attachment fails the whole compose.
+    let attachments: PreparedAttachment[] = [];
+    try {
+      attachments = await prepareAttachments(body?.attachments);
+    } catch (e: any) {
+      return NextResponse.json({ success: false, error: e?.message || 'Could not prepare attachments.' }, { status: 400 });
+    }
+
     const selection = readSelection(body);
     const { recipients, skippedSystem } = await resolveRecipients(selection);
     if (!recipients.length) {
@@ -156,6 +217,7 @@ export async function POST(request: NextRequest) {
             to: r.email,
             toName: r.name || null,
             ...adminMessage({ name: r.name || 'there', subjectEn, subjectBn, bodyEn, bodyBn }),
+            ...(attachments.length ? { attachments } : {}),
           });
         } catch {
           return false; // sendEmail is non-fatal by contract, but never let one row break the batch
@@ -174,6 +236,7 @@ export async function POST(request: NextRequest) {
         selected: recipients.length,
         sent,
         failed,
+        attachments: attachments.length,
         skippedSystem,
         remaining: Math.max(0, recipients.length - MAX_RECIPIENTS),
       },
