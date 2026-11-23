@@ -226,6 +226,58 @@ export function emailChanged(args: {
 }
 
 // -------------------------------------------------------------------------------------
+// 2c. Admin-composed message — a welcome, a re-engagement nudge, a note from the team.
+// -------------------------------------------------------------------------------------
+export function adminMessage(args: {
+  name: string;
+  subjectEn: string;
+  subjectBn?: string | null;
+  bodyEn: string;
+  bodyBn?: string | null;
+}): EmailBody {
+  const name = esc(args.name || 'there');
+  const subjectEn = esc(args.subjectEn);
+  const subjectBn = args.subjectBn ? esc(args.subjectBn) : '';
+  const subject = subjectBn ? `${args.subjectEn} / ${args.subjectBn}` : args.subjectEn;
+
+  // Keep the author's paragraph breaks; everything else is plain text and escaped. The {name}
+  // placeholder is substituted before escaping so a name with markup can never inject HTML.
+  const paras = (raw: string) =>
+    String(raw || '')
+      .split(/\n+/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => p(esc(line.replace(/\{name\}/gi, args.name || 'there'))))
+      .join('');
+
+  const enBlock = `${h(subjectEn)}${p(`Hi ${name},`)}${paras(args.bodyEn)}`;
+  const bnBlock = args.bodyBn || args.subjectBn
+    ? `${h(subjectBn || subjectEn)}${p(`প্রিয় ${name},`)}${paras(args.bodyBn || args.bodyEn)}`
+    : '';
+
+  return {
+    subject,
+    html: wrap(`${enBlock}${bnBlock ? `${divider}${bnBlock}` : ''}`),
+    text: [
+      args.subjectEn,
+      '',
+      `Hi ${args.name || 'there'},`,
+      ...String(args.bodyEn || '').split(/\n+/).map((l) => l.trim()).filter(Boolean)
+        .map((l) => l.replace(/\{name\}/gi, args.name || 'there')),
+      ...(bnBlock ? [
+        '',
+        '---',
+        '',
+        subjectBn || args.subjectEn,
+        `প্রিয় ${args.name || 'there'},`,
+        ...String(args.bodyBn || args.bodyEn || '').split(/\n+/).map((l) => l.trim()).filter(Boolean)
+          .map((l) => l.replace(/\{name\}/gi, args.name || 'there')),
+      ] : []),
+    ].join('\n'),
+  };
+}
+
+// -------------------------------------------------------------------------------------
 // 3. Password reset link
 // -------------------------------------------------------------------------------------
 export function passwordReset(args: {

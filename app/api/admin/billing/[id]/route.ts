@@ -236,6 +236,8 @@ export async function PATCH(
             target_tenant_id: updatedLedgerRecord.tenant_id,
             title: 'Rent payment marked as sent',
             content: `${tenantName} marked the rent for ${monthLabel} (৳${amount}) as sent. Please verify the payment and confirm receipt.`,
+            is_clickable: true,
+            action_url: '/owner#billing',
           },
         ]);
       if (noticeError) {
@@ -248,7 +250,7 @@ export async function PATCH(
         await sendPushToUsers([updatedLedgerRecord.created_by_owner], {
           title: 'Rent marked as sent',
           body: `${tenantName} says they've sent ৳${amount} for ${monthLabel}. Please confirm receipt.`,
-          url: '/owner',
+          url: '/owner#billing',
           tag: `bill-sent-${billingRecordId}`,
         });
       } catch (pushErr) {

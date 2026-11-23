@@ -5,6 +5,7 @@ import { assertOwnerCanWrite } from '../../../../lib/subscription';
 import { sendPushToUsers, sendPushToRole } from '../../../../lib/push-send';
 import crypto from 'crypto';
 import { apiError } from '@/lib/api-response';
+import { normalizeNoticeAction, audienceForScope } from '@/lib/notice-targets';
 
 // Audiences a notice can address. See ADD_NOTICE_TARGETS.sql for the matching DB constraint.
 const VALID_SCOPES = [
@@ -66,6 +67,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Target owner ID must be provided when circulating to a single owner.' }, { status: 400 });
     }
 
+    // Optional click-through. The admin picks a destination from a fixed list that matches the
+    // audience's dashboard; a non-clickable notice keeps the old display-only behaviour.
+    const action = normalizeNoticeAction(audienceForScope(targetScope), bodyPayload);
+    if (!action.ok) {
+      return NextResponse.json({ error: action.error }, { status: 400 });
+    }
+
     const noticeRecordId = crypto.randomUUID();
 
     const { data: createdNotice, error: databaseInsertException } = await supabaseAdminEngine
@@ -79,13 +87,21 @@ export async function POST(request: NextRequest) {
           target_tenant_id: targetScope === 'individual_tenant' ? targetTenantId : null,
           target_owner_id: targetScope === 'individual_owner' ? targetOwnerId : null,
           title: title,
-          content: content
+          content: content,
+          is_clickable: action.clickable,
+          action_url: action.actionUrl
         }
       ])
       .select()
       .single();
 
     if (databaseInsertException) {
+      const code = (databaseInsertException as any)?.code;
+      if (code === 'PGRST204' || code === '42703') {
+        return NextResponse.json({
+          error: 'Clickable notices need ADD_NOTICE_ACTIONS.sql to be run in Supabase first.',
+        }, { status: 409 });
+      }
       return apiError(request, databaseInsertException);
     }
 
@@ -97,24 +113,24 @@ export async function POST(request: NextRequest) {
     };
     try {
       if (targetScope === 'individual_tenant') {
-        await sendPushToUsers([targetTenantId], { ...pushPayload, url: '/tenant' });
+        await sendPushToUsers([targetTenantId], { ...pushPayload, url: action.actionUrl || '/tenant' });
       } else if (targetScope === 'individual_owner') {
-        await sendPushToUsers([targetOwnerId], { ...pushPayload, url: '/owner' });
+        await sendPushToUsers([targetOwnerId], { ...pushPayload, url: action.actionUrl || '/owner' });
       } else if (targetScope === 'all_tenants') {
         // An owner's broadcast pushes to their own tenants; the admin's goes to every tenant.
         if (role === 'admin') {
-          await sendPushToRole('tenant', { ...pushPayload, url: '/tenant' });
+          await sendPushToRole('tenant', { ...pushPayload, url: action.actionUrl || '/tenant' });
         } else {
           const { data: ownTenants } = await supabaseAdminEngine
             .from('tenants').select('id').eq('owner_id', ownerId);
           const ids = (ownTenants || []).map((t: { id: string }) => t.id);
-          if (ids.length) await sendPushToUsers(ids, { ...pushPayload, url: '/tenant' });
+          if (ids.length) await sendPushToUsers(ids, { ...pushPayload, url: action.actionUrl || '/tenant' });
         }
       } else if (targetScope === 'all_owners') {
-        await sendPushToRole('owner', { ...pushPayload, url: '/owner' });
+        await sendPushToRole('owner', { ...pushPayload, url: action.actionUrl || '/owner' });
       } else if (targetScope === 'everyone') {
-        await sendPushToRole('owner', { ...pushPayload, url: '/owner' });
-        await sendPushToRole('tenant', { ...pushPayload, url: '/tenant' });
+        await sendPushToRole('owner', { ...pushPayload, url: action.actionUrl || '/owner' });
+        await sendPushToRole('tenant', { ...pushPayload, url: action.actionUrl || '/tenant' });
       }
     } catch (pushErr) {
       console.error('[notices] push dispatch failed (non-fatal):', pushErr);

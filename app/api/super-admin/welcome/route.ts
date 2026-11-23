@@ -4,6 +4,7 @@ import { supabaseAdminEngine } from '@/lib/supabase-server';
 import { sendPushToUsers } from '@/lib/push-send';
 import crypto from 'crypto';
 import { apiError } from '@/lib/api-response';
+import { normalizeNoticeAction, type NoticeAudience } from '@/lib/notice-targets';
 
 // =====================================================================================
 // 👋 ADMIN — WELCOME NEW USERS
@@ -138,6 +139,13 @@ export async function POST(request: NextRequest) {
     const audience: Audience = (AUDIENCES as readonly string[]).includes(body.audience) ? body.audience : 'both';
     const days = Math.max(0, Math.min(365, parseInt(body.days ?? '7', 10) || 0));
 
+    const targetAudience: NoticeAudience =
+      audience === 'new_owners' ? 'owner' : audience === 'new_tenants' ? 'tenant' : 'everyone';
+    const action = normalizeNoticeAction(targetAudience, body);
+    if (!action.ok) {
+      return NextResponse.json({ success: false, error: action.error }, { status: 400 });
+    }
+
     const { recipients } = await resolveRecipients(audience, days);
     if (!recipients.length) {
       return NextResponse.json({
@@ -158,10 +166,21 @@ export async function POST(request: NextRequest) {
       target_tenant_id: r.role === 'tenant' ? r.id : null,
       title,
       content,
+      is_clickable: action.clickable,
+      action_url: action.actionUrl,
     }));
 
     const { error: noticeErr } = await supabaseAdminEngine.from('notices').insert(noticeRows);
-    if (noticeErr) throw noticeErr;
+    if (noticeErr) {
+      const code = (noticeErr as any)?.code;
+      if (code === 'PGRST204' || code === '42703') {
+        return NextResponse.json({
+          success: false,
+          error: 'Clickable notices need ADD_NOTICE_ACTIONS.sql to be run in Supabase first.',
+        }, { status: 409 });
+      }
+      throw noticeErr;
+    }
 
     // 2. The dedupe log. Best-effort: if this fails the notices are already delivered, and
     // refusing to report a successful send would be worse than a possible duplicate later.
@@ -184,8 +203,8 @@ export async function POST(request: NextRequest) {
       const ownerIds = batch.filter((r) => r.role === 'owner').map((r) => r.id);
       const tenantIds = batch.filter((r) => r.role === 'tenant').map((r) => r.id);
       const payload = { title, body: content.slice(0, 180), tag: `welcome-${Date.now()}` };
-      if (ownerIds.length) await sendPushToUsers(ownerIds, { ...payload, url: '/owner' });
-      if (tenantIds.length) await sendPushToUsers(tenantIds, { ...payload, url: '/tenant' });
+      if (ownerIds.length) await sendPushToUsers(ownerIds, { ...payload, url: action.actionUrl || '/owner' });
+      if (tenantIds.length) await sendPushToUsers(tenantIds, { ...payload, url: action.actionUrl || '/tenant' });
     } catch (pushErr) {
       console.error('[welcome] push dispatch failed (non-fatal):', pushErr);
     }

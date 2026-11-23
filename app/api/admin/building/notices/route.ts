@@ -118,6 +118,9 @@ export async function POST(request: NextRequest) {
           target_scope: 'all_tenants',
           title,
           content,
+          // Same destination the push already uses, so the inbox card can be tapped too.
+          is_clickable: true,
+          action_url: '/tenant',
         });
         if (error) throw error;
         delivered = 1;
@@ -141,6 +144,8 @@ export async function POST(request: NextRequest) {
             target_owner_id: ownerId,
             title,
             content,
+            is_clickable: true,
+            action_url: '/owner#notices',
           }));
           const { error } = await supabaseAdminEngine.from('notices').insert(rows);
           if (error) throw error;

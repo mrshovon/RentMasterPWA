@@ -38,6 +38,13 @@ export interface NotifyInput {
   url?: string;
   /** Push collapse key — a second notification with the same tag replaces the first. */
   tag?: string;
+  /**
+   * Where tapping the IN-APP notice should go. Defaults to `url`, so every system notice that
+   * already knows its push destination becomes clickable without touching its call site.
+   */
+  actionUrl?: string | null;
+  /** Explicitly false makes a notice display-only even when a URL is available. */
+  clickable?: boolean;
   /** Who it is from. 'system_admin' for anything the platform itself generates. */
   senderType?: 'owner' | 'system_admin';
   senderId?: string | null;
@@ -46,6 +53,8 @@ export interface NotifyInput {
 export async function notifyUser(input: NotifyInput): Promise<void> {
   const senderType = input.senderType ?? 'system_admin';
   const url = input.url ?? (input.audience === 'owner' ? '/owner' : '/tenant');
+  const actionUrl = input.actionUrl !== undefined ? input.actionUrl : url;
+  const clickable = input.clickable !== undefined ? input.clickable : !!actionUrl;
 
   // 1. The inbox row.
   try {
@@ -62,6 +71,8 @@ export async function notifyUser(input: NotifyInput): Promise<void> {
         target_tenant_id: input.audience === 'tenant' ? input.userId : null,
         title: input.title,
         content: input.body,
+        is_clickable: clickable,
+        action_url: actionUrl || null,
       },
     ]);
     if (error) throw error;
@@ -80,7 +91,7 @@ export async function notifyUser(input: NotifyInput): Promise<void> {
     await sendPushToUsers([input.userId], {
       title: input.title,
       body: input.body.slice(0, PUSH_BODY_MAX),
-      url,
+      url: actionUrl || url,
       ...(input.tag ? { tag: input.tag } : {}),
     });
   } catch (err) {

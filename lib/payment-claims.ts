@@ -186,6 +186,8 @@ export async function notifyClaim(args: {
       target_tenant_id: null,
       title,
       content,
+      is_clickable: true,
+      action_url: isRent ? '/owner#billing' : '/building#invoices',
     }]);
     if (error) throw error;
   } catch (err) {
@@ -200,7 +202,7 @@ export async function notifyClaim(args: {
     await sendPushToUsers([args.payeeId], {
       title: isRent ? 'Rent marked as sent' : 'Service charge marked as sent',
       body: `${args.payerName} says they've paid ৳${args.amount} for ${args.refLabel}. Please confirm receipt.`,
-      url: isRent ? '/owner' : '/building',
+      url: isRent ? '/owner#billing' : '/building#invoices',
       tag: `claim-${args.source}-${args.refLabel}`,
     });
   } catch (err) {

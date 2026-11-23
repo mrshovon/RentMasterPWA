@@ -93,6 +93,8 @@ export async function deliverReminder(reminder: ReminderRow): Promise<number> {
           target_tenant_id: t.id,
           title: 'Rent reminder',
           content: msg,
+          is_clickable: true,
+          action_url: '/tenant#billing',
         }]);
       } catch (e) {
         console.error('[reminders] notice insert failed (non-fatal):', e);
@@ -103,7 +105,7 @@ export async function deliverReminder(reminder: ReminderRow): Promise<number> {
         await sendPushToUsers([t.id], {
           title: 'Rent reminder',
           body: msg.slice(0, 180),
-          url: '/tenant',
+          url: '/tenant#billing',
           tag: `reminder-${reminder.id}-${t.id}`,
         });
       } catch (e) {
