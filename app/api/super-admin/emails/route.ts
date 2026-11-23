@@ -43,7 +43,7 @@ const MAX_ATTACHMENT_TOTAL = 8 * 1024 * 1024;
 const ATTACHMENT_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'pdf'];
 
 interface AttachmentInput { path: string; name: string }
-interface PreparedAttachment { name: string; content: string }
+interface PreparedAttachment { name: string; content: string; path: string; isImage: boolean }
 
 /**
  * Download + base64-encode every attachment ONCE, before any mail is sent. A bad file therefore
@@ -80,7 +80,7 @@ async function prepareAttachments(raw: any): Promise<PreparedAttachment[]> {
     if (total > MAX_ATTACHMENT_TOTAL) {
       throw new Error('Attachments exceed 8MB in total.');
     }
-    out.push({ name, content: Buffer.from(bytes).toString('base64') });
+    out.push({ name, content: Buffer.from(bytes).toString('base64'), path, isImage: ext !== 'pdf' });
   }
   return out;
 }
@@ -201,6 +201,19 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: e?.message || 'Could not prepare attachments.' }, { status: 400 });
     }
 
+    // Which uploads should ALSO appear inside the message. Indices match the {{image:N}}
+    // placeholders shown in the admin form. URLs come from our own bucket, never from the client.
+    const inlineIndices: number[] = Array.isArray(body?.inlineIndices)
+      ? body.inlineIndices.map((n: any) => Number(n)).filter((n: number) => Number.isInteger(n) && n >= 1)
+      : [];
+    const inlineImages = inlineIndices
+      .map((index) => ({ index, attachment: attachments[index - 1] }))
+      .filter((x) => !!x.attachment?.isImage)
+      .map((x) => {
+        const { data } = supabaseAdminEngine.storage.from(STORAGE_BUCKET).getPublicUrl(x.attachment!.path);
+        return { index: x.index, url: data.publicUrl, name: x.attachment!.name };
+      });
+
     const selection = readSelection(body);
     const { recipients, skippedSystem } = await resolveRecipients(selection);
     if (!recipients.length) {
@@ -216,7 +229,7 @@ export async function POST(request: NextRequest) {
           return await sendEmail({
             to: r.email,
             toName: r.name || null,
-            ...adminMessage({ name: r.name || 'there', subjectEn, subjectBn, bodyEn, bodyBn }),
+            ...adminMessage({ name: r.name || 'there', subjectEn, subjectBn, bodyEn, bodyBn, inlineImages }),
             ...(attachments.length ? { attachments } : {}),
           });
         } catch {
@@ -237,6 +250,7 @@ export async function POST(request: NextRequest) {
         sent,
         failed,
         attachments: attachments.length,
+        inlineImages: inlineImages.length,
         skippedSystem,
         remaining: Math.max(0, recipients.length - MAX_RECIPIENTS),
       },

@@ -228,17 +228,48 @@ export function emailChanged(args: {
 // -------------------------------------------------------------------------------------
 // 2c. Admin-composed message — a welcome, a re-engagement nudge, a note from the team.
 // -------------------------------------------------------------------------------------
+export interface AdminInlineImage {
+  /** 1-based, matching the {{image:N}} placeholder shown to the admin. */
+  index: number;
+  url: string;
+  name: string;
+}
+
 export function adminMessage(args: {
   name: string;
   subjectEn: string;
   subjectBn?: string | null;
   bodyEn: string;
   bodyBn?: string | null;
+  inlineImages?: AdminInlineImage[];
 }): EmailBody {
   const name = esc(args.name || 'there');
   const subjectEn = esc(args.subjectEn);
   const subjectBn = args.subjectBn ? esc(args.subjectBn) : '';
   const subject = subjectBn ? `${args.subjectEn} / ${args.subjectBn}` : args.subjectEn;
+  const images = args.inlineImages || [];
+
+  // Brevo has no documented inlineImage field, but the upload already lives in our public bucket.
+  // Referencing that URL from the HTML renders the picture in the message itself; the attachment
+  // copy is still sent so the reader has the file even if their mail app hides remote images.
+  // URLs here are generated server-side from our own storage paths, never typed by the admin.
+  const IMG_STYLE = 'display:block;max-width:100%;height:auto;border-radius:12px;margin:10px 0;';
+  const renderImage = (img: AdminInlineImage, textMode: boolean) => textMode
+    ? `[Image: ${img.name}]`
+    : `<img src="${esc(img.url)}" alt="${esc(img.name)}" style="${IMG_STYLE}" />`;
+  const withImages = (line: string, textMode: boolean) =>
+    line.replace(/\{\{image:(\d+)\}\}/g, (whole, rawIndex) => {
+      const img = images.find((i) => i.index === Number(rawIndex));
+      return img ? renderImage(img, textMode) : whole;
+    });
+
+  // An inline image with no placeholder would otherwise vanish silently. Append those at the end
+  // of the English body once (not once per language block, which would duplicate them).
+  const used = new Set<number>();
+  for (const m of `${args.bodyEn || ''}\n${args.bodyBn || ''}`.matchAll(/\{\{image:(\d+)\}\}/g)) {
+    used.add(Number(m[1]));
+  }
+  const appended = images.filter((i) => !used.has(i.index));
 
   // Keep the author's paragraph breaks; everything else is plain text and escaped. The {name}
   // placeholder is substituted before escaping so a name with markup can never inject HTML.
@@ -247,10 +278,14 @@ export function adminMessage(args: {
       .split(/\n+/)
       .map((line) => line.trim())
       .filter(Boolean)
-      .map((line) => p(esc(line.replace(/\{name\}/gi, args.name || 'there'))))
+      .map((line) => p(withImages(esc(line.replace(/\{name\}/gi, args.name || 'there')), false)))
       .join('');
+  const plainLines = (raw: string) =>
+    String(raw || '').split(/\n+/).map((l) => l.trim()).filter(Boolean)
+      .map((l) => withImages(l.replace(/\{name\}/gi, args.name || 'there'), true));
 
-  const enBlock = `${h(subjectEn)}${p(`Hi ${name},`)}${paras(args.bodyEn)}`;
+  const enBlock = `${h(subjectEn)}${p(`Hi ${name},`)}${paras(args.bodyEn)}`
+    + appended.map((i) => p(renderImage(i, false))).join('');
   const bnBlock = args.bodyBn || args.subjectBn
     ? `${h(subjectBn || subjectEn)}${p(`প্রিয় ${name},`)}${paras(args.bodyBn || args.bodyEn)}`
     : '';
@@ -262,16 +297,15 @@ export function adminMessage(args: {
       args.subjectEn,
       '',
       `Hi ${args.name || 'there'},`,
-      ...String(args.bodyEn || '').split(/\n+/).map((l) => l.trim()).filter(Boolean)
-        .map((l) => l.replace(/\{name\}/gi, args.name || 'there')),
+      ...plainLines(args.bodyEn),
+      ...appended.map((i) => renderImage(i, true)),
       ...(bnBlock ? [
         '',
         '---',
         '',
         subjectBn || args.subjectEn,
         `প্রিয় ${args.name || 'there'},`,
-        ...String(args.bodyBn || args.bodyEn || '').split(/\n+/).map((l) => l.trim()).filter(Boolean)
-          .map((l) => l.replace(/\{name\}/gi, args.name || 'there')),
+        ...plainLines(args.bodyBn || args.bodyEn),
       ] : []),
     ].join('\n'),
   };
