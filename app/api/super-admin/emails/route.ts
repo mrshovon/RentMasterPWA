@@ -99,12 +99,19 @@ interface Selection {
 }
 
 function readSelection(raw: Record<string, any>, fromQuery = false): Selection {
-  const mode: Mode = (MODES as readonly string[]).includes(raw?.mode) ? raw.mode : 'specific';
+  // The GET dry run passes a `{get}` wrapper around URLSearchParams; POST passes the JSON body.
+  // EVERY field must be read through the same abstraction — an earlier version only did so for
+  // ids/emails, leaving mode and inactiveDays as undefined on every dry run. That silently made
+  // all previews a "specific" query with empty ids, so changing the days field never changed the
+  // recipient count. Read the two scalar fields the same way as the lists.
+  const pick = (key: string) => fromQuery ? raw?.get?.(key) : raw?.[key];
+  const rawMode = pick('mode');
+  const mode: Mode = (MODES as readonly string[]).includes(rawMode) ? rawMode : 'specific';
   const splitList = (v: any): string[] => {
     if (Array.isArray(v)) return v.map(String);
     return String(v ?? '').split(/[\s,;]+/).map((s) => s.trim()).filter(Boolean);
   };
-  const days = Math.max(1, Math.min(3650, parseInt(raw?.inactiveDays ?? '30', 10) || 30));
+  const days = Math.max(1, Math.min(3650, parseInt(pick('inactiveDays') ?? '30', 10) || 30));
   return {
     mode,
     ids: splitList(fromQuery ? raw.get?.('ids') : raw?.ids),
